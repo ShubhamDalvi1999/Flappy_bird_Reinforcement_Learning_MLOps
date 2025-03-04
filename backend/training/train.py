@@ -6,433 +6,368 @@ import torch
 import mlflow
 import wandb
 from datetime import datetime
+from flask_socketio import SocketIO
 from pyspark.sql import SparkSession
 from pyspark.ml.feature import VectorAssembler
 from pyspark.ml.stat import Correlation
+import base64
 
 from game.flappy_bird import FlappyBirdEnv
 from agent.dqn_agent import DQNAgent
+from wandb_config import init_wandb, log_episode_metrics, log_model_summary
 
 class TrainingManager:
-    def __init__(self):
+    def __init__(self, socketio=None):
         self.env = None
         self.agent = None
         self.is_training = False
-        self.stop_requested = False
-        self.current_episode = 0
-        self.total_episodes = 0
-        self.latest_score = 0
+        self.socketio = socketio
+        self.episode_rewards = []
+        self.episode_scores = []
         self.best_score = 0
-        self.training_stats = []
-        self.message = "Not training"
-        self.spark = None
+        self.wandb_run = None
+        self.current_model_id = None
+
+    def load_model(self, model_id=None):
+        """Load a specific model or create a new one"""
+        try:
+            self.env = FlappyBirdEnv()
+            state_size = self.env.observation_space.shape[0]
+            action_size = self.env.action_space.n
+            
+            self.agent = DQNAgent(state_size, action_size)
+            
+            if model_id:
+                model_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'models', f'{model_id}.h5')
+                if os.path.exists(model_path):
+                    print(f"Loading model from {model_path}")
+                    self.agent.load(model_path)
+                    self.current_model_id = model_id
+                else:
+                    raise FileNotFoundError(f"Model file not found: {model_path}")
+            
+            return True
+        except Exception as e:
+            print(f"Error loading model: {e}")
+            return False
+
+    def initialize_training(self, model_id=None):
+        """Initialize the environment and agent for training"""
+        if not self.load_model(model_id):
+            return False
+            
+        # Initialize MLflow run
+        mlflow.start_run()
+        mlflow.log_param("state_size", self.env.observation_space.shape[0])
+        mlflow.log_param("action_size", self.env.action_space.n)
+        mlflow.log_param("base_model", model_id if model_id else "new")
         
-    def train(self, episodes=1000, batch_size=64, save_interval=100, use_mlflow=True, use_wandb=True):
-        """
-        Train the agent
+        # Initialize W&B with custom config
+        self.wandb_run = init_wandb({
+            'config': {
+                'state_size': self.env.observation_space.shape[0],
+                'action_size': self.env.action_space.n,
+                'learning_rate': self.agent.learning_rate,
+                'gamma': self.agent.gamma,
+                'epsilon_start': self.agent.epsilon,
+                'epsilon_min': self.agent.epsilon_min,
+                'epsilon_decay': self.agent.epsilon_decay,
+                'batch_size': self.agent.batch_size,
+                'memory_size': len(self.agent.memory),
+                'base_model': model_id if model_id else "new"
+            }
+        })
         
-        Args:
-            episodes (int): Number of episodes to train
-            batch_size (int): Batch size for learning
-            save_interval (int): Save model every N episodes
-            use_mlflow (bool): Whether to log to MLflow
-            use_wandb (bool): Whether to log to Weights & Biases
-        """
-        if self.is_training:
-            return {"status": "error", "message": "Training already in progress"}
+        # Log model architecture
+        if hasattr(self.agent, 'model'):
+            log_model_summary(self.agent.model)
+        
+        return True
+
+    def train(self, num_episodes=1000, model_id=None, config=None):
+        """Train the agent with enhanced configuration and monitoring"""
+        if not self.env or not self.agent or (model_id and model_id != self.current_model_id):
+            if not self.initialize_training(model_id):
+                raise Exception("Failed to initialize training")
         
         self.is_training = True
-        self.stop_requested = False
-        self.current_episode = 0
-        self.total_episodes = episodes
-        self.training_stats = []
-        self.message = "Training started"
+        start_time = time.time()
+        total_steps = 0
+        best_score = float('-inf')
+        episodes_without_improvement = 0
+        
+        # Apply configuration
+        if config:
+            if config.get('learning_rate'):
+                self.agent.learning_rate = config['learning_rate']
+            if config.get('batch_size'):
+                self.agent.batch_size = config['batch_size']
+            if config.get('epsilon_decay'):
+                self.agent.epsilon_decay = config['epsilon_decay']
         
         try:
-            # Initialize environment and agent
-            self.env = FlappyBirdEnv(render=False)
-            self.agent = DQNAgent(
-                state_size=self.env.state_size,
-                action_size=self.env.action_size,
-                batch_size=batch_size
-            )
+            # Generate a unique model ID for this training run
+            new_model_id = f"model_{int(time.time())}"
             
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            run_name = f"training_{timestamp}"
-            
-            # Initialize MLflow
-            if use_mlflow:
-                mlflow.set_experiment("flappy_bird_rl")
-                mlflow.start_run(run_name=run_name)
-                mlflow.log_param("episodes", episodes)
-                mlflow.log_param("batch_size", batch_size)
-                mlflow.log_param("learning_rate", self.agent.learning_rate)
-                mlflow.log_param("gamma", self.agent.gamma)
-                mlflow.log_param("hidden_sizes", str(self.agent.hidden_sizes))
-            
-            # Initialize W&B with enhanced configuration
-            if use_wandb:
-                try:
-                    # Import system metrics libraries
-                    import psutil
-                    import platform
-                    
-                    # Get system information for tracking
-                    system_info = {
-                        "cpu_count": psutil.cpu_count(),
-                        "memory_total": psutil.virtual_memory().total / (1024 ** 3),  # GB
-                        "platform": platform.platform(),
-                        "python_version": platform.python_version()
-                    }
-                    
-                    # Try to get GPU information
-                    try:
-                        import tensorflow as tf
-                        gpus = tf.config.list_physical_devices('GPU')
-                        system_info["gpu_available"] = len(gpus) > 0
-                        system_info["gpu_count"] = len(gpus)
-                        system_info["tf_version"] = tf.__version__
-                    except:
-                        system_info["gpu_available"] = False
-                    
-                    # Initialize W&B with detailed configuration
-                    wandb.init(
-                        project="flappy-bird-rl",
-                        name=run_name,
-                        config={
-                            # Agent parameters
-                            "episodes": episodes,
-                            "batch_size": batch_size,
-                            "learning_rate": self.agent.learning_rate,
-                            "gamma": self.agent.gamma,
-                            "epsilon_start": self.agent.epsilon,
-                            "epsilon_min": self.agent.epsilon_min,
-                            "epsilon_decay": self.agent.epsilon_decay,
-                            "memory_size": len(self.agent.memory),
-                            
-                            # Model architecture
-                            "model_architecture": "DQN",
-                            "hidden_layers": str(self.agent.hidden_sizes),
-                            
-                            # Environment settings
-                            "env_name": "FlappyBird",
-                            "state_size": self.env.state_size,
-                            "action_size": self.env.action_size,
-                            
-                            # System information
-                            "system": system_info
-                        }
-                    )
-                    
-                    # Log model architecture as a summary
-                    wandb.run.summary["model_summary"] = str(self.agent.model.summary())
-                    
-                    # Set up W&B Alerts
-                    wandb.alert(
-                        title="Training Started",
-                        text=f"Training has started with {episodes} episodes and batch size {batch_size}",
-                        level=wandb.AlertLevel.INFO
-                    )
-                except Exception as e:
-                    print(f"Error initializing W&B: {e}")
-                    use_wandb = False
-            
-            # Training loop
-            scores = []
-            epsilons = []
-            losses = []
-            
-            for episode in range(1, episodes + 1):
-                if self.stop_requested:
-                    self.message = "Training stopped by user"
-                    break
+            # Start MLflow run with proper tags
+            with mlflow.start_run() as run:
+                # Log model parameters
+                mlflow.log_params({
+                    'learning_rate': self.agent.learning_rate,
+                    'gamma': self.agent.gamma,
+                    'epsilon_start': self.agent.epsilon,
+                    'epsilon_min': self.agent.epsilon_min,
+                    'epsilon_decay': self.agent.epsilon_decay,
+                    'batch_size': self.agent.batch_size,
+                    'memory_size': len(self.agent.memory),
+                    'architecture': 'DQN',
+                    'base_model': model_id if model_id else "new",
+                    **{k: v for k, v in (config or {}).items() if v is not None}
+                })
                 
-                self.current_episode = episode
-                state = self.env.reset()
-                score = 0
-                done = False
+                # Tag the run with model ID
+                mlflow.set_tag('model_id', new_model_id)
                 
-                while not done:
-                    # Get agent's action
-                    action = self.agent.act(state)
-                    
-                    # Take action in environment
-                    next_state, reward, done, _ = self.env.step(action)
-                    
-                    # Store experience in replay memory
-                    self.agent.remember(state, action, reward, next_state, done)
-                    
-                    # Update state and score
-                    state = next_state
-                    score += reward
-                    
-                    # If game over, end episode
-                    if done:
+                checkpoint_interval = config.get('checkpoint_interval', 100) if config else 100
+                target_score = config.get('target_score') if config else None
+                early_stopping = config.get('early_stopping', True) if config else True
+                
+                for episode in range(num_episodes):
+                    if not self.is_training:
                         break
-                
-                # Train the agent after each episode
-                loss = self.agent.replay()
-                
-                # Update epsilon
-                self.agent.update_epsilon()
-                
-                # Store episode results
-                scores.append(score)
-                epsilons.append(self.agent.epsilon)
-                losses.append(loss)
-                
-                # Update latest and best scores
-                self.latest_score = score
-                self.best_score = max(self.best_score, score)
-                
-                # Log metrics
-                if use_mlflow:
-                    mlflow.log_metric("score", score, step=episode)
-                    mlflow.log_metric("epsilon", self.agent.epsilon, step=episode)
-                    if loss is not None:
-                        mlflow.log_metric("loss", loss, step=episode)
-                    mlflow.log_metric("avg_score_last_100", np.mean(scores[-100:]), step=episode)
-                
-                if use_wandb:
-                    # Enhanced W&B logging with more visualization types
-                    wandb_log_data = {
-                        "episode": episode,
-                        "score": score,
-                        "epsilon": self.agent.epsilon,
-                        "loss": loss if loss is not None else 0,
-                        "avg_score_last_100": np.mean(scores[-100:]) if len(scores) >= 100 else np.mean(scores)
-                    }
-                    
-                    # Add histogram of recent scores every 10 episodes
-                    if episode % 10 == 0 and len(scores) >= 10:
-                        recent_scores = scores[-100:] if len(scores) >= 100 else scores
-                        wandb_log_data["score_histogram"] = wandb.Histogram(recent_scores)
                         
-                        # Add action distribution as pie chart
-                        if hasattr(self.agent, 'action_counts'):
-                            action_labels = ["Do nothing", "Flap"]
-                            wandb_log_data["action_distribution"] = wandb.plot.pie_chart(
-                                labels=action_labels,
-                                values=[self.agent.action_counts.get(0, 0), self.agent.action_counts.get(1, 0)],
-                                title="Action Distribution"
-                            )
+                    state, _ = self.env.reset()
+                    total_reward = 0
+                    done = False
+                    episode_loss = []
+                    episode_steps = 0
                     
-                    # Create a custom chart showing multiple metrics
-                    if episode % 25 == 0:
-                        # Create a performance summary table
-                        performance_data = []
-                        for i in range(max(1, episode-25), episode+1):
-                            if i < len(scores):  # Ensure index is valid
-                                row = [i, scores[i], epsilons[i], losses[i] if i < len(losses) and losses[i] is not None else 0]
-                                performance_data.append(row)
+                    while not done and self.is_training:
+                        # Get action from agent
+                        action = self.agent.get_action(state)
                         
-                        if performance_data:
-                            performance_table = wandb.Table(
-                                columns=["Episode", "Score", "Epsilon", "Loss"],
-                                data=performance_data
-                            )
-                            wandb_log_data["performance_summary"] = performance_table
+                        # Take action in environment
+                        next_state, reward, done, _, _ = self.env.step(action)
+                        
+                        # Store experience in replay memory
+                        self.agent.remember(state, action, reward, next_state, done)
+                        
+                        # Update state and accumulate reward
+                        state = next_state
+                        total_reward += reward
+                        episode_steps += 1
+                        total_steps += 1
+                        
+                        # Render the game and emit frame
+                        if self.socketio:
+                            frame = self.env.render()
+                            frame_base64 = base64.b64encode(frame).decode('utf-8')
+                            self.socketio.emit('game_frame', {
+                                'frame': frame_base64,
+                                'score': self.env.score,
+                                'episode': episode + 1,
+                                'epsilon': self.agent.epsilon,
+                                'total_episodes': num_episodes,
+                                'estimated_time_remaining': (num_episodes - episode) * (time.time() - start_time) / (episode + 1) if episode > 0 else None
+                            })
+                            time.sleep(0.033)  # ~30 FPS
+                        
+                        # Train the agent
+                        if len(self.agent.memory) > self.agent.batch_size:
+                            loss = self.agent.replay(self.agent.batch_size)
+                            if loss is not None:
+                                episode_loss.append(loss)
                     
-                    # Log all the data to W&B
-                    wandb.log(wandb_log_data)
-                
-                # Save progress data
-                self.training_stats.append({
-                    "episode": episode,
-                    "score": score,
-                    "epsilon": self.agent.epsilon,
-                    "loss": loss if loss is not None else 0,
-                    "avg_score_last_100": np.mean(scores[-100:]) if len(scores) >= 100 else np.mean(scores)
-                })
-                
-                # Print progress
-                if episode % 10 == 0:
-                    avg_score = np.mean(scores[-100:]) if len(scores) >= 100 else np.mean(scores)
-                    self.message = f"Episode: {episode}/{episodes} | Score: {score:.2f} | Avg Score: {avg_score:.2f} | Epsilon: {self.agent.epsilon:.4f}"
-                    print(self.message)
-                
-                # Save model
-                if episode % save_interval == 0 or episode == episodes:
-                    model_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "models")
-                    os.makedirs(model_dir, exist_ok=True)
-                    model_path = os.path.join(model_dir, f"dqn_model_ep{episode}.pth")
-                    self.agent.save(model_path)
+                    # Calculate average loss for the episode
+                    avg_loss = np.mean(episode_loss) if episode_loss else None
                     
-                    if use_mlflow:
+                    # Update best score and check for early stopping
+                    if self.env.score > best_score:
+                        best_score = self.env.score
+                        episodes_without_improvement = 0
+                        
+                        # Save best model
+                        model_path = f"models/best_model_{best_score}.h5"
+                        self.agent.save_model(model_path)
                         mlflow.log_artifact(model_path)
-                        
-                    if use_wandb:
-                        wandb.save(model_path)
-            
-            # Save final progress data
-            self.save_progress(scores, epsilons, losses)
-            
-            # Analyze training data with Spark
-            if len(scores) > 100:
-                self.analyze_with_spark(scores, epsilons, losses)
-            
-            # End logging sessions
-            if use_mlflow:
-                mlflow.end_run()
-            
-            if use_wandb:
-                # Log final summary data to W&B
-                agent_summary = self.agent.get_summary()
+                        if self.wandb_run:
+                            wandb.save(model_path)
+                    else:
+                        episodes_without_improvement += 1
+                    
+                    # Early stopping check
+                    if early_stopping and episodes_without_improvement >= 50:  # No improvement in 50 episodes
+                        print("Early stopping triggered - No improvement in 50 episodes")
+                        if self.socketio:
+                            self.socketio.emit('training_info', {
+                                'message': 'Early stopping triggered - No improvement in 50 episodes'
+                            })
+                        break
+                    
+                    # Target score check
+                    if target_score and self.env.score >= target_score:
+                        print(f"Target score {target_score} achieved!")
+                        if self.socketio:
+                            self.socketio.emit('training_info', {
+                                'message': f'Target score {target_score} achieved!'
+                            })
+                        break
+                    
+                    # Checkpoint saving
+                    if (episode + 1) % checkpoint_interval == 0:
+                        checkpoint_path = f"models/checkpoint_{new_model_id}_ep{episode + 1}.h5"
+                        self.agent.save_model(checkpoint_path)
+                        mlflow.log_artifact(checkpoint_path)
+                        if self.wandb_run:
+                            wandb.save(checkpoint_path)
+                    
+                    # Log metrics and emit progress
+                    metrics = {
+                        'episode_reward': total_reward,
+                        'score': self.env.score,
+                        'epsilon': self.agent.epsilon,
+                        'best_score': best_score,
+                        'episode_steps': episode_steps,
+                        'total_steps': total_steps,
+                        'average_score': np.mean(self.episode_scores[-100:] if self.episode_scores else [0]),
+                        'average_reward': np.mean(self.episode_rewards[-100:] if self.episode_rewards else [0])
+                    }
+                    if avg_loss is not None:
+                        metrics['loss'] = avg_loss
+                    
+                    mlflow.log_metrics(metrics, step=episode)
+                    
+                    if self.wandb_run:
+                        log_episode_metrics(
+                            episode=episode + 1,
+                            score=self.env.score,
+                            reward=total_reward,
+                            epsilon=self.agent.epsilon,
+                            loss=avg_loss
+                        )
+                    
+                    # Store episode data
+                    self.episode_rewards.append(total_reward)
+                    self.episode_scores.append(self.env.score)
+                    
+                    # Emit detailed training stats
+                    if self.socketio:
+                        self.socketio.emit('training_stats', {
+                            'episode': episode + 1,
+                            'total_episodes': num_episodes,
+                            'score': self.env.score,
+                            'reward': total_reward,
+                            'epsilon': self.agent.epsilon,
+                            'best_score': best_score,
+                            'loss': avg_loss,
+                            'estimated_time_remaining': (num_episodes - episode) * (time.time() - start_time) / (episode + 1) if episode > 0 else None,
+                            'episodes_without_improvement': episodes_without_improvement
+                        })
+                    
+                    print(f"Episode: {episode + 1}/{num_episodes}, Score: {self.env.score}, "
+                          f"Reward: {total_reward:.2f}, Epsilon: {self.agent.epsilon:.2f}"
+                          + (f", Loss: {avg_loss:.4f}" if avg_loss is not None else ""))
                 
-                # Log final model summary
-                wandb.run.summary.update({
-                    "final_epsilon": self.agent.epsilon,
-                    "best_score": self.best_score,
-                    "final_memory_size": len(self.agent.memory),
-                    "total_episodes": episodes
-                })
-                
-                # Create a summary of loss metrics
-                if "loss_stats" in agent_summary:
-                    wandb.run.summary.update(agent_summary["loss_stats"])
-                
-                # Create a final action distribution chart
-                if total_actions := sum(self.agent.action_counts.values()):
-                    action_labels = ["Do nothing", "Flap"]
-                    action_values = [
-                        self.agent.action_counts.get(0, 0) / total_actions * 100,
-                        self.agent.action_counts.get(1, 0) / total_actions * 100
-                    ]
-                    action_chart = wandb.plot.bar(
-                        wandb.Table(
-                            columns=["Action", "Percentage"], 
-                            data=[[action_labels[i], action_values[i]] for i in range(len(action_labels))]
-                        ),
-                        "Action", "Percentage",
-                        title="Final Action Distribution (%)"
-                    )
-                    wandb.log({"final_action_distribution": action_chart})
-                
-                # Create a performance over time chart
-                if len(scores) > 0:
-                    score_progress = wandb.plot.line(
-                        wandb.Table(
-                            columns=["episode", "score", "avg_score"],
-                            data=[[i+1, scores[i], 
-                                  np.mean(scores[max(0, i-99):i+1])] 
-                                  for i in range(len(scores))]
-                        ),
-                        "episode", "score",
-                        title="Score Progress"
-                    )
-                    wandb.log({"score_progress_chart": score_progress})
-                
-                # Finish the W&B run
-                wandb.finish()
+                # Log final metrics
+                training_time = (time.time() - start_time) / 60  # Convert to minutes
+                final_metrics = {
+                    'final_epsilon': self.agent.epsilon,
+                    'max_score': best_score,
+                    'training_time_minutes': training_time,
+                    'total_episodes': episode + 1,
+                    'total_steps': total_steps,
+                    'final_average_score': np.mean(self.episode_scores[-100:]),
+                    'final_average_reward': np.mean(self.episode_rewards[-100:]),
+                    'early_stopped': episodes_without_improvement >= 50 if early_stopping else False
+                }
+                mlflow.log_metrics(final_metrics)
             
-            self.message = "Training completed"
+            # Save the final model
+            final_model_path = os.path.join(
+                os.path.dirname(os.path.dirname(__file__)),
+                'models',
+                f'{new_model_id}.h5'
+            )
+            self.agent.save(final_model_path)
+            mlflow.log_artifact(final_model_path)
+            
+            if self.wandb_run:
+                wandb.save(final_model_path)
+            
+            return new_model_id
             
         except Exception as e:
-            self.message = f"Training error: {str(e)}"
-            print(f"Error during training: {str(e)}")
+            print(f"Training interrupted: {str(e)}")
+            if self.socketio:
+                self.socketio.emit('training_error', {'error': str(e)})
+            raise e
         
         finally:
-            self.is_training = False
-            if self.env:
-                self.env.close()
-    
+            self.stop_training()
+            if self.wandb_run:
+                # Log final summary data
+                wandb.run.summary.update({
+                    'final_epsilon': self.agent.epsilon,
+                    'best_score': best_score,
+                    'final_memory_size': len(self.agent.memory),
+                    'total_episodes': episode + 1 if 'episode' in locals() else 0,
+                    'average_score': np.mean(self.episode_scores),
+                    'average_reward': np.mean(self.episode_rewards),
+                    'training_time_minutes': (time.time() - start_time) / 60
+                })
+                wandb.finish()
+
     def stop_training(self):
-        """Request to stop the training process"""
-        self.stop_requested = True
-        return {"status": "success", "message": "Stop requested"}
-    
-    def get_status(self):
-        """Get current training status"""
-        progress = {}
-        if len(self.training_stats) > 0:
-            recent_stats = self.training_stats[-min(100, len(self.training_stats)):]
-            progress = {
-                "episodes": [s["episode"] for s in recent_stats],
-                "scores": [s["score"] for s in recent_stats],
-                "avg_scores": [s["avg_score_last_100"] for s in recent_stats],
-                "epsilons": [s["epsilon"] for s in recent_stats],
-                "losses": [s["loss"] for s in recent_stats]
-            }
+        """Stop the training process"""
+        self.is_training = False
+        if self.env:
+            self.env.close()
+
+    def get_training_stats(self):
+        """Get current training statistics"""
+        if not self.episode_rewards:
+            return None
+            
+        return {
+            'total_episodes': len(self.episode_rewards),
+            'latest_reward': self.episode_rewards[-1],
+            'latest_score': self.episode_scores[-1],
+            'best_score': self.best_score,
+            'average_reward': np.mean(self.episode_rewards[-100:]),
+            'average_score': np.mean(self.episode_scores[-100:])
+        }
+
+    def analyze_training_data(self):
+        """Analyze training data using PySpark"""
+        if not self.episode_rewards:
+            return None
+            
+        # Create SparkSession
+        spark = SparkSession.builder.appName("FlappyBirdAnalysis").getOrCreate()
+        
+        # Create DataFrame with training data
+        data = [(i, r, s) for i, (r, s) in enumerate(zip(self.episode_rewards, self.episode_scores))]
+        df = spark.createDataFrame(data, ["episode", "reward", "score"])
+        
+        # Calculate correlations
+        assembler = VectorAssembler(inputCols=["reward", "score"], outputCol="features")
+        df_vector = assembler.transform(df)
+        correlation = Correlation.corr(df_vector, "features").head()[0].toArray()
+        
+        # Calculate statistics
+        stats = df.select(
+            [
+                "reward",
+                "score"
+            ]
+        ).summary("count", "mean", "stddev", "min", "max").toPandas()
+        
+        spark.stop()
         
         return {
-            "is_training": self.is_training,
-            "message": self.message,
-            "current_episode": self.current_episode,
-            "total_episodes": self.total_episodes,
-            "latest_score": self.latest_score,
-            "best_score": self.best_score,
-            "progress": progress
+            'correlation': correlation.tolist(),
+            'stats': json.loads(stats.to_json())
         }
-    
-    def save_progress(self, scores, epsilons, losses):
-        """Save training progress to file"""
-        data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
-        os.makedirs(data_dir, exist_ok=True)
-        
-        progress_path = os.path.join(data_dir, f"training_progress_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
-        
-        progress_data = {
-            "episodes": list(range(1, len(scores) + 1)),
-            "scores": scores,
-            "epsilons": epsilons,
-            "losses": [l if l is not None else 0 for l in losses],
-            "timestamp": time.time()
-        }
-        
-        with open(progress_path, "w") as f:
-            json.dump(progress_data, f)
-    
-    def init_spark(self):
-        """Initialize Spark session"""
-        if self.spark is None:
-            self.spark = SparkSession.builder \
-                .appName("FlappyBirdAnalytics") \
-                .config("spark.executor.memory", "2g") \
-                .config("spark.driver.memory", "2g") \
-                .getOrCreate()
-        return self.spark
-    
-    def analyze_with_spark(self, scores, epsilons, losses):
-        """Analyze training data with Spark"""
-        try:
-            # Initialize Spark
-            spark = self.init_spark()
-            
-            # Create dataframe
-            data = [{
-                "episode": i + 1,
-                "score": scores[i],
-                "epsilon": epsilons[i],
-                "loss": losses[i] if losses[i] is not None else 0
-            } for i in range(len(scores))]
-            
-            df = spark.createDataFrame(data)
-            
-            # Calculate rolling average
-            window_size = 100
-            window_spec = Window.orderBy("episode").rowsBetween(-(window_size-1), 0)
-            df = df.withColumn("avg_score_100", F.avg("score").over(window_spec))
-            
-            # Calculate correlation
-            assembler = VectorAssembler(
-                inputCols=["score", "epsilon", "loss"],
-                outputCol="features"
-            )
-            df_assembled = assembler.transform(df)
-            
-            # Compute correlation matrix
-            correlation_matrix = Correlation.corr(df_assembled, "features").collect()[0][0]
-            print("Correlation Matrix:")
-            print(correlation_matrix)
-            
-            # Log statistics with MLflow
-            mlflow.log_metric("correlation_score_epsilon", float(correlation_matrix[0, 1]))
-            mlflow.log_metric("correlation_score_loss", float(correlation_matrix[0, 2]))
-            
-            # More advanced analytics could be added here
-            
-        except Exception as e:
-            print(f"Error during Spark analysis: {str(e)}")
 
 
 if __name__ == "__main__":

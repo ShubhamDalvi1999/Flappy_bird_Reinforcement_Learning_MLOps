@@ -12,9 +12,12 @@ from game.flappy_bird import FlappyBirdEnv
 from agent.dqn_agent import DQNAgent
 from training.train import TrainingManager
 import pandas as pd
+from flask_socketio import SocketIO
+from wandb_config import init_wandb
 
 app = Flask(__name__)
 CORS(app)
+socketio = SocketIO(app, cors_allowed_origins="*")
 
 # Initialize MLflow - use environment variable or default to mlflow container
 tracking_uri = os.environ.get("MLFLOW_TRACKING_URI", "http://mlflow:5000")
@@ -23,64 +26,55 @@ print(f"MLflow tracking URI set to: {tracking_uri}")
 
 # Add W&B status endpoint
 @app.route('/api/wandb/status', methods=['GET'])
-def check_wandb_status():
-    """Check Weights & Biases connection status and recent runs"""
+def get_wandb_status():
+    """Check Weights & Biases connection status"""
     try:
-        # Check if WANDB_API_KEY is set
-        api_key = os.environ.get('WANDB_API_KEY')
+        api_key = os.getenv('WANDB_API_KEY')
+        entity = os.getenv('WANDB_ENTITY')
+        project = os.getenv('WANDB_PROJECT', 'flappy-bird-rl')
+        
         if not api_key:
             return jsonify({
-                'status': 'success',
-                'wandb_status': 'not_configured',
+                'status': 'error',
                 'message': 'WANDB_API_KEY environment variable is not set'
             })
+            
+        # Try to initialize a test run
+        test_run = init_wandb({
+            'name': 'connection-test',
+            'entity': entity,
+            'project': project
+        })
         
-        # Try to initialize wandb API
+        # Get recent runs
         api = wandb.Api()
+        runs = list(api.runs(f"{entity}/{project}" if entity else project))
+        recent_runs = []
         
-        # Get recent runs (up to 10)
-        entity = os.environ.get('WANDB_ENTITY') 
-        project = os.environ.get('WANDB_PROJECT', 'flappy-bird-rl')
+        for run in runs[:10]:  # Get last 10 runs
+            recent_runs.append({
+                'id': run.id,
+                'name': run.name,
+                'state': run.state,
+                'created_at': run.created_at,
+                'config': run.config,
+                'summary': {k: v for k, v in run.summary.items() if not k.startswith('_')}
+            })
         
-        try:
-            recent_runs = []
-            
-            if entity:
-                runs = api.runs(f"{entity}/{project}", per_page=10)
-            else:
-                # Try to get the default entity from the API
-                runs = api.runs(f"{project}", per_page=10)
-            
-            for run in runs:
-                run_data = {
-                    'id': run.id,
-                    'name': run.name,
-                    'state': run.state,
-                    'created_at': run.created_at,
-                    'summary': {k: v for k, v in run.summary.items()}
-                }
-                recent_runs.append(run_data)
-            
-            return jsonify({
-                'status': 'success',
-                'wandb_status': 'connected',
-                'message': 'Successfully connected to W&B',
-                'recent_runs': recent_runs
-            })
-            
-        except Exception as e:
-            # Could connect to W&B but couldn't fetch runs
-            return jsonify({
-                'status': 'success',
-                'wandb_status': 'connected',
-                'message': f'Connected to W&B but could not fetch runs: {str(e)}',
-                'recent_runs': []
-            })
-            
+        # Clean up test run
+        test_run.finish()
+        
+        return jsonify({
+            'status': 'success',
+            'message': 'Successfully connected to W&B',
+            'entity': entity,
+            'project': project,
+            'recent_runs': recent_runs
+        })
+        
     except Exception as e:
         return jsonify({
             'status': 'error',
-            'wandb_status': 'error',
             'message': f'Error connecting to W&B: {str(e)}'
         })
 
@@ -124,8 +118,21 @@ def check_gpu():
             'error': str(e)
         })
 
+# Global variable for training manager
+training_manager = None
+
 # Initialize training manager
-training_manager = TrainingManager()
+def init_training_manager():
+    global training_manager
+    if training_manager is None:
+        try:
+            print("Initializing training manager...")
+            training_manager = TrainingManager(socketio=socketio)
+            print("Training manager initialized successfully")
+        except Exception as e:
+            print(f"Error initializing training manager: {str(e)}")
+            return False
+    return True
 
 # Game session
 game_session = {
@@ -148,32 +155,69 @@ def init_spark():
             .getOrCreate()
     return spark
 
+def initialize_mlflow():
+    """Initialize MLflow configuration and create default experiment"""
+    try:
+        # Set up MLflow tracking URI
+        tracking_uri = os.environ.get("MLFLOW_TRACKING_URI", "http://mlflow:5000")
+        mlflow.set_tracking_uri(tracking_uri)
+        print(f"MLflow tracking URI set to: {tracking_uri}")
+        
+        # Create default experiment if it doesn't exist
+        experiment_name = "flappy-bird-rl"
+        try:
+            experiment = mlflow.get_experiment_by_name(experiment_name)
+            if experiment is None:
+                experiment_id = mlflow.create_experiment(
+                    experiment_name,
+                    artifact_location=os.environ.get("MLFLOW_DEFAULT_ARTIFACT_ROOT", "/mlflow/artifacts")
+                )
+                print(f"Created new MLflow experiment with ID: {experiment_id}")
+            else:
+                print(f"Using existing MLflow experiment: {experiment.experiment_id}")
+        except Exception as e:
+            print(f"Error setting up MLflow experiment: {e}")
+            # Create a fallback experiment
+            try:
+                experiment_id = mlflow.create_experiment("Default")
+                print(f"Created fallback MLflow experiment with ID: {experiment_id}")
+            except:
+                print("Failed to create fallback experiment")
+        
+        return True
+    except Exception as e:
+        print(f"Error initializing MLflow: {e}")
+        return False
+
 def initialize_app():
-    """Initialize the application by creating necessary directories and default models."""
-    # Create models directory if it doesn't exist
+    """Initialize the application components"""
+    # Create necessary directories
     models_dir = os.path.join(os.path.dirname(__file__), 'models')
     os.makedirs(models_dir, exist_ok=True)
     
-    # Create a default model file if none exists
+    # Initialize MLflow
+    mlflow_initialized = initialize_mlflow()
+    if not mlflow_initialized:
+        print("Warning: MLflow initialization failed")
+    
+    # Create a default model if none exists
     model_files = [f for f in os.listdir(models_dir) if f.endswith('.h5') or f.endswith('.pth')]
     if not model_files:
         print("Creating a default model file...")
-        # Create a simple DQN agent and save it
-        env = FlappyBirdEnv()
-        agent = DQNAgent(state_size=4, action_size=2)
-        default_model_path = 'default_model'
-        agent.save(default_model_path)
-        print(f"Default model created at {default_model_path}.h5")
-    
-    # Create a default MLflow experiment if none exists
-    try:
-        experiments = mlflow.search_experiments()
-        if not experiments:
-            print("Creating a default MLflow experiment...")
-            mlflow.create_experiment("Default Experiment")
-            print("Default MLflow experiment created")
-    except Exception as e:
-        print(f"Error creating MLflow experiment: {e}")
+        try:
+            env = FlappyBirdEnv()
+            agent = DQNAgent(state_size=4, action_size=2)
+            default_model_path = os.path.join(models_dir, 'default_model.h5')
+            agent.save(default_model_path)
+            print(f"Default model created at {default_model_path}")
+            
+            # Log default model to MLflow if initialized
+            if mlflow_initialized:
+                with mlflow.start_run(description="Default model creation") as run:
+                    mlflow.log_artifact(default_model_path)
+                    mlflow.log_param("model_type", "default")
+        except Exception as e:
+            print(f"Error creating default model: {e}")
 
 # Initialize the app
 initialize_app()
@@ -211,50 +255,127 @@ def get_models():
         'models': models
     })
 
-@app.route('/api/training/start', methods=['POST'])
+@app.route('/api/train', methods=['POST'])
 def start_training():
-    """Start training process"""
-    data = request.json
-    episodes = data.get('episodes', 1000)
-    save_interval = data.get('save_interval', 100)
-    
-    # Start training in a separate thread
-    def training_task():
-        training_manager.train(
-            episodes=episodes,
-            save_interval=save_interval,
-            use_mlflow=True,
-            use_wandb=True
-        )
-    
-    thread = threading.Thread(target=training_task)
-    thread.daemon = True
-    thread.start()
-    
-    return jsonify({
-        'status': 'success',
-        'message': f'Training started with {episodes} episodes'
-    })
+    """Start training with optional base model and configuration"""
+    try:
+        data = request.get_json()
+        
+        # Episode validation and configuration
+        episodes = data.get('episodes', 1000)
+        if not isinstance(episodes, int) or episodes < 1:
+            return jsonify({
+                "status": "error",
+                "message": "Episodes must be a positive integer"
+            })
+        
+        # Cap maximum episodes for safety
+        max_episodes = int(os.getenv('MAX_TRAINING_EPISODES', 10000))
+        if episodes > max_episodes:
+            return jsonify({
+                "status": "warning",
+                "message": f"Episodes capped at {max_episodes}",
+                "original_episodes": episodes,
+                "adjusted_episodes": max_episodes
+            })
+            episodes = max_episodes
+        
+        # Get optional configuration
+        model_id = data.get('model_id')
+        config = {
+            'learning_rate': data.get('learning_rate'),
+            'batch_size': data.get('batch_size'),
+            'epsilon_decay': data.get('epsilon_decay'),
+            'early_stopping': data.get('early_stopping', True),
+            'target_score': data.get('target_score'),
+            'checkpoint_interval': data.get('checkpoint_interval', 100)
+        }
+        
+        # Validate model_id if provided
+        if model_id:
+            models_dir = os.path.join(os.path.dirname(__file__), 'models')
+            model_path = os.path.join(models_dir, f'{model_id}.h5')
+            if not os.path.exists(model_path):
+                return jsonify({
+                    "status": "error",
+                    "message": f"Model {model_id} not found"
+                })
+        
+        # Estimate training time (rough estimate)
+        estimated_time = episodes * 0.5  # 0.5 seconds per episode estimate
+        
+        # Start training in a background thread
+        def train_async():
+            try:
+                new_model_id = training_manager.train(
+                    num_episodes=episodes,
+                    model_id=model_id,
+                    config=config
+                )
+                socketio.emit('training_complete', {
+                    'status': 'success',
+                    'message': 'Training completed successfully',
+                    'model_id': new_model_id
+                })
+            except Exception as e:
+                socketio.emit('training_error', {
+                    'status': 'error',
+                    'message': str(e)
+                })
+        
+        thread = threading.Thread(target=train_async)
+        thread.daemon = True
+        thread.start()
+        
+        return jsonify({
+            "status": "success",
+            "message": "Training started",
+            "base_model": model_id if model_id else "new",
+            "config": {
+                "episodes": episodes,
+                "estimated_time_seconds": estimated_time,
+                **{k: v for k, v in config.items() if v is not None}
+            }
+        })
+        
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        })
 
-@app.route('/api/training/stop', methods=['POST'])
+@app.route('/api/stop', methods=['POST'])
 def stop_training():
-    """Stop the training process"""
     training_manager.stop_training()
-    return jsonify({
-        'status': 'success',
-        'message': 'Training stopped'
-    })
+    return jsonify({"status": "success", "message": "Training stopped"})
 
-@app.route('/api/training/status', methods=['GET'])
-def training_status():
-    """Get current training status"""
-    status = training_manager.get_status()
-    return jsonify({
-        'status': 'success',
-        'is_training': status['is_training'],
-        'message': status['message'],
-        'progress': status.get('progress', {})
-    })
+@app.route('/api/stats', methods=['GET'])
+def get_stats():
+    stats = training_manager.get_training_stats()
+    if stats is None:
+        return jsonify({"status": "error", "message": "No training data available"})
+    return jsonify({"status": "success", "data": stats})
+
+@app.route('/api/analysis', methods=['GET'])
+def get_analysis():
+    analysis = training_manager.analyze_training_data()
+    if analysis is None:
+        return jsonify({"status": "error", "message": "No training data available for analysis"})
+    return jsonify({"status": "success", "data": analysis})
+
+@app.route('/api/wandb/status', methods=['GET'])
+def get_wandb_status():
+    try:
+        is_logged_in = wandb.api.api_key is not None
+        return jsonify({
+            "status": "success",
+            "logged_in": is_logged_in
+        })
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        })
 
 @app.route('/api/mlflow/experiments', methods=['GET'])
 def get_mlflow_experiments():
@@ -375,18 +496,34 @@ def get_mlflow_runs():
 
 @app.route('/api/models/<model_id>/metrics', methods=['GET'])
 def get_model_metrics(model_id):
-    """Get metrics for a specific model"""
+    """Get metrics for a specific model from MLflow"""
     try:
-        # Here we would retrieve metrics from MLflow or a database
-        # For simplicity, generating some example metrics
+        # Search for runs that used this model
+        runs = mlflow.search_runs(
+            filter_string=f"tags.model_id = '{model_id}'"
+        )
+        
+        if runs.empty:
+            return jsonify({
+                'status': 'error',
+                'message': f'No metrics found for model {model_id}'
+            })
+        
+        # Get the latest run for this model
+        latest_run = runs.iloc[0]
+        
+        # Extract metrics from the run
         metrics = {
-            'max_score': 125,
-            'avg_score': 56.8,
-            'episodes_trained': 1000,
-            'learning_rate': 0.001,
-            'discount_factor': 0.99,
-            'training_time': 45,  # minutes
-            'architecture': 'DQN (3 layers)'
+            'max_score': float(latest_run.get('metrics.max_score', 0)),
+            'avg_score': float(latest_run.get('metrics.average_score', 0)),
+            'episodes_trained': int(latest_run.get('metrics.episodes_trained', 0)),
+            'learning_rate': float(latest_run.get('params.learning_rate', 0.001)),
+            'discount_factor': float(latest_run.get('params.gamma', 0.99)),
+            'training_time': float(latest_run.get('metrics.training_time_minutes', 0)),
+            'architecture': latest_run.get('params.architecture', 'DQN'),
+            'epsilon_final': float(latest_run.get('metrics.final_epsilon', 0)),
+            'total_steps': int(latest_run.get('metrics.total_steps', 0)),
+            'best_episode_reward': float(latest_run.get('metrics.best_episode_reward', 0))
         }
         
         return jsonify({
@@ -394,9 +531,10 @@ def get_model_metrics(model_id):
             'metrics': metrics
         })
     except Exception as e:
+        print(f"Error fetching model metrics: {str(e)}")
         return jsonify({
             'status': 'error',
-            'message': str(e)
+            'message': f'Failed to fetch metrics: {str(e)}'
         })
 
 @app.route('/api/models/<model_id>/history', methods=['GET'])
@@ -551,6 +689,56 @@ def get_analytics_summary():
             'message': str(e)
         })
 
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Health check endpoint for Docker"""
+    try:
+        # Check MLflow connection
+        mlflow_ok = False
+        mlflow_error = None
+        try:
+            # Simple check that doesn't require database access
+            assert mlflow.get_tracking_uri() == tracking_uri
+            # Try a lightweight operation
+            mlflow.search_experiments(max_results=1)
+            mlflow_ok = True
+        except Exception as e:
+            mlflow_error = str(e)
+            print(f"MLflow health check failed: {mlflow_error}")
+
+        # Check if training manager is initialized or can be initialized
+        training_ok = training_manager is not None
+        if not training_ok:
+            training_ok = init_training_manager()
+
+        # Overall health status
+        is_healthy = mlflow_ok and training_ok
+
+        response = {
+            'status': 'healthy' if is_healthy else 'unhealthy',
+            'checks': {
+                'mlflow': {
+                    'status': 'ok' if mlflow_ok else 'error',
+                    'tracking_uri': tracking_uri
+                },
+                'training_manager': {
+                    'status': 'ok' if training_ok else 'error',
+                    'initialized': training_manager is not None
+                }
+            }
+        }
+
+        if not is_healthy:
+            if not mlflow_ok and mlflow_error:
+                response['checks']['mlflow']['error'] = mlflow_error
+
+        return jsonify(response), 200 if is_healthy else 503
+    except Exception as e:
+        return jsonify({
+            'status': 'unhealthy',
+            'error': str(e)
+        }), 503
+
 # MLflow UI redirect
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
@@ -561,4 +749,8 @@ def catch_all(path):
     return f"MLflow UI is available at <a href='/mlflow/'>/mlflow/</a>"
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True) 
+    # Set MLflow tracking URI
+    mlflow.set_tracking_uri(os.getenv('MLFLOW_TRACKING_URI', 'http://mlflow:5000'))
+    
+    # Start the app with SocketIO
+    socketio.run(app, host='0.0.0.0', port=5000, debug=True) 

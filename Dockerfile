@@ -1,44 +1,55 @@
-FROM python:3.9-slim
+FROM python:3.9-slim AS builder
 
-WORKDIR /app
-
-# Install system dependencies for pygame and mlflow
+# Install build dependencies
 RUN apt-get update && apt-get install -y \
-    libsdl2-dev \
-    libsdl2-image-dev \
-    libsdl2-mixer-dev \
-    libsdl2-ttf-dev \
-    libfreetype6-dev \
-    libportmidi-dev \
     build-essential \
-    git \
-    curl \
-    default-jre-headless \
-    && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies
-COPY backend/requirements.txt /app/
-RUN pip install --no-cache-dir -r requirements.txt
+# Set up working directory
+WORKDIR /build
+
+# Copy requirements
+COPY backend/requirements.txt .
+
+# Install Python dependencies into a virtual environment
+RUN python -m venv /venv
+ENV PATH="/venv/bin:$PATH"
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# Final stage
+FROM python:3.9-slim
+
+# Install only runtime dependencies
+RUN apt-get update && apt-get install -y \
+    libsdl2-2.0-0 \
+    libsdl2-image-2.0-0 \
+    xvfb \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy virtual environment from builder
+COPY --from=builder /venv /venv
+ENV PATH="/venv/bin:$PATH"
+
+# Set up working directory
+WORKDIR /app
 
 # Copy backend code
 COPY backend/ /app/
 
-# Create directories for models, data, logs, and ensure proper permissions
-RUN mkdir -p /app/models /app/data /app/logs /tmp/gunicorn && \
-    chmod -R 777 /app/models /app/data /app/logs /tmp/gunicorn
+# Copy game assets (only what's needed)
+COPY imgs/ /app/imgs/
 
-# Make port 5000 available for the app
-EXPOSE 5000
+# Create necessary directories with minimal permissions
+RUN mkdir -p /app/models /app/data /app/logs && \
+    chmod -R 755 /app/models /app/data /app/logs
 
-# Set environment variables
+# Set environment variables for Pygame in headless mode
+ENV SDL_VIDEODRIVER=dummy
+ENV DISPLAY=:99
 ENV PYTHONUNBUFFERED=1
-ENV MLFLOW_TRACKING_URI=http://mlflow:5000
-ENV DOCKER_ENV=1
-ENV TF_FORCE_GPU_ALLOW_GROWTH=true
-ENV GUNICORN_WORKERS=2
-ENV GUNICORN_THREADS=4
-ENV GUNICORN_TIMEOUT=120
 
-# Run app with gunicorn
-CMD ["sh", "-c", "gunicorn --bind 0.0.0.0:5000 --workers ${GUNICORN_WORKERS} --threads ${GUNICORN_THREADS} --timeout ${GUNICORN_TIMEOUT} --worker-tmp-dir /tmp/gunicorn app:app"] 
+# Start Xvfb and run the application
+CMD Xvfb :99 -screen 0 1024x768x24 -ac +extension GLX +render -noreset & \
+    python app.py 

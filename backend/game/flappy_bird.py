@@ -1,6 +1,142 @@
+import os
+import pygame
+import random
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
+
+pygame.init()
+
+class Bird:
+    IMGS = [pygame.transform.scale2x(pygame.image.load(os.path.join("imgs", f"bird{i}.png"))) for i in range(1, 4)]
+    MAX_ROTATION = 25
+    ROT_VEL = 20
+    ANIMATION_TIME = 5
+
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+        self.tilt = 0
+        self.tick_count = 0
+        self.vel = 0
+        self.height = self.y
+        self.img_count = 0
+        self.img = self.IMGS[0]
+
+    def jump(self):
+        self.vel = -10.5
+        self.tick_count = 0
+        self.height = self.y
+
+    def move(self):
+        self.tick_count += 1
+        d = self.vel * self.tick_count + 1.5 * self.tick_count**2
+
+        if d >= 16:
+            d = 16
+        if d < 0:
+            d -= 2
+
+        self.y = self.y + d
+
+        if d < 0 or self.y < self.height + 50:
+            if self.tilt < self.MAX_ROTATION:
+                self.tilt = self.MAX_ROTATION
+        else:
+            if self.tilt > -90:
+                self.tilt -= self.ROT_VEL
+
+    def draw(self, win):
+        self.img_count += 1
+
+        if self.img_count < self.ANIMATION_TIME:
+            self.img = self.IMGS[0]
+        elif self.img_count < self.ANIMATION_TIME*2:
+            self.img = self.IMGS[1]
+        elif self.img_count < self.ANIMATION_TIME*3:
+            self.img = self.IMGS[2]
+        elif self.img_count < self.ANIMATION_TIME*4:
+            self.img = self.IMGS[1]
+        elif self.img_count == self.ANIMATION_TIME*4 + 1:
+            self.img = self.IMGS[0]
+            self.img_count = 0
+
+        if self.tilt <= -80:
+            self.img = self.IMGS[1]
+            self.img_count = self.ANIMATION_TIME*2
+
+        rotated_image = pygame.transform.rotate(self.img, self.tilt)
+        new_rect = rotated_image.get_rect(center=self.img.get_rect(topleft=(self.x, self.y)).center)
+        win.blit(rotated_image, new_rect.topleft)
+
+    def get_mask(self):
+        return pygame.mask.from_surface(self.img)
+
+class Pipe:
+    GAP = 200
+    VEL = 5
+
+    def __init__(self, x):
+        self.x = x
+        self.height = 0
+        self.gap = 100
+
+        self.top = 0
+        self.bottom = 0
+        self.PIPE_TOP = pygame.transform.flip(pygame.transform.scale2x(pygame.image.load(os.path.join("imgs", "pipe.png"))), False, True)
+        self.PIPE_BOTTOM = pygame.transform.scale2x(pygame.image.load(os.path.join("imgs", "pipe.png")))
+
+        self.passed = False
+        self.set_height()
+
+    def set_height(self):
+        self.height = random.randrange(50, 450)
+        self.top = self.height - self.PIPE_TOP.get_height()
+        self.bottom = self.height + self.GAP
+
+    def move(self):
+        self.x -= self.VEL
+
+    def draw(self, win):
+        win.blit(self.PIPE_TOP, (self.x, self.top))
+        win.blit(self.PIPE_BOTTOM, (self.x, self.bottom))
+
+    def collide(self, bird):
+        bird_mask = bird.get_mask()
+        top_mask = pygame.mask.from_surface(self.PIPE_TOP)
+        bottom_mask = pygame.mask.from_surface(self.PIPE_BOTTOM)
+
+        top_offset = (self.x - bird.x, self.top - round(bird.y))
+        bottom_offset = (self.x - bird.x, self.bottom - round(bird.y))
+
+        b_point = bird_mask.overlap(bottom_mask, bottom_offset)
+        t_point = bird_mask.overlap(top_mask, top_offset)
+
+        return bool(t_point or b_point)
+
+class Base:
+    VEL = 5
+    WIDTH = pygame.transform.scale2x(pygame.image.load(os.path.join("imgs", "base.png"))).get_width()
+    IMG = pygame.transform.scale2x(pygame.image.load(os.path.join("imgs", "base.png")))
+
+    def __init__(self, y):
+        self.y = y
+        self.x1 = 0
+        self.x2 = self.WIDTH
+
+    def move(self):
+        self.x1 -= self.VEL
+        self.x2 -= self.VEL
+
+        if self.x1 + self.WIDTH < 0:
+            self.x1 = self.x2 + self.WIDTH
+
+        if self.x2 + self.WIDTH < 0:
+            self.x2 = self.x1 + self.WIDTH
+
+    def draw(self, win):
+        win.blit(self.IMG, (self.x1, self.y))
+        win.blit(self.IMG, (self.x2, self.y))
 
 class FlappyBirdEnv(gym.Env):
     """Custom Flappy Bird environment that follows gym interface"""
@@ -47,6 +183,20 @@ class FlappyBirdEnv(gym.Env):
         self.state_size = self.observation_space.shape[0]
         self.action_size = self.action_space.n
         
+        # Initialize Pygame
+        self.win_width = 600
+        self.win_height = 800
+        self.win = pygame.display.set_mode((self.win_width, self.win_height))
+        pygame.display.set_caption("Flappy Bird")
+        
+        # Load game assets
+        self.bg_img = pygame.transform.scale(pygame.image.load(os.path.join("imgs", "bg.png")), (self.win_width, self.win_height))
+        
+        # Initialize game objects
+        self.bird = None
+        self.base = None
+        self.clock = pygame.time.Clock()
+        
     def reset(self, seed=None):
         if seed is not None:
             np.random.seed(seed)
@@ -61,6 +211,10 @@ class FlappyBirdEnv(gym.Env):
         self.score = 0
         self.steps = 0
         
+        self.bird = Bird(230, 350)
+        self.pipes = [Pipe(700)]
+        self.base = Base(730)
+        
         state = self._get_state()
         return state, {}
     
@@ -69,113 +223,87 @@ class FlappyBirdEnv(gym.Env):
         
         # Apply action (flap)
         if action == 1:
-            self.bird_velocity = self.flap_strength
+            self.bird.jump()
         
-        # Apply gravity and update bird position
-        self.bird_velocity = min(self.bird_velocity + self.gravity, self.max_velocity)
-        self.bird_y += self.bird_velocity
-        
-        # Update pipes
-        self._update_pipes()
-        
-        # Check for collisions
-        done = self._check_collision()
-        
-        # Check if reached max score (optional terminal condition)
-        if self.score >= self.max_score:
-            done = True
-        
-        # Calculate reward
-        if done:
-            reward = -10  # Penalty for collision
-        else:
-            reward = 0.1  # Small reward for surviving
+        # Move bird and update game objects
+        self.bird.move()
+        self.base.move()
+
+        # Add new pipe
+        if len(self.pipes) > 0 and 600 - self.pipes[-1].x > 300:
+            self.pipes.append(Pipe(600))
+
+        # Move pipes and remove off-screen pipes
+        rem = []
+        for pipe in self.pipes:
+            pipe.move()
             
-            # Additional reward for passing a pipe
-            for pipe in self.pipes:
-                if self.bird_x > pipe['x'] and self.bird_x <= pipe['x'] + self.pipe_velocity:
-                    reward += 1.0
-        
+            # Check for collision
+            if pipe.collide(self.bird):
+                done = True
+                reward = -1
+                break
+            
+            # Remove off-screen pipes
+            if pipe.x + pipe.PIPE_TOP.get_width() < 0:
+                rem.append(pipe)
+                
+            # Check if bird passed pipe
+            if not pipe.passed and pipe.x < self.bird.x:
+                pipe.passed = True
+                self.score += 1
+                reward = 1
+
+        # Remove passed pipes
+        for r in rem:
+            self.pipes.remove(r)
+
+        # Check for ground collision
+        if self.bird.y + self.bird.img.get_height() >= 730 or self.bird.y < 0:
+            done = True
+            reward = -1
+
         state = self._get_state()
         info = {'score': self.score}
         
         return state, reward, done, False, info
     
-    def _check_collision(self):
-        # Check if bird hits the ground or ceiling
-        if self.bird_y <= 0 or self.bird_y >= self.window_height:
-            return True
-        
-        # Check for collision with pipes
-        for pipe in self.pipes:
-            # Top pipe
-            if (self.bird_x + self.bird_width > pipe['x'] and 
-                self.bird_x < pipe['x'] + self.pipe_width and 
-                self.bird_y < pipe['y']):
-                return True
-            
-            # Bottom pipe
-            if (self.bird_x + self.bird_width > pipe['x'] and 
-                self.bird_x < pipe['x'] + self.pipe_width and 
-                self.bird_y + self.bird_height > pipe['y'] + self.pipe_gap):
-                return True
-                
-        return False
-    
-    def _update_pipes(self):
-        # Move pipes
-        for pipe in self.pipes:
-            pipe['x'] += self.pipe_velocity
-        
-        # Remove pipes that are off-screen
-        self.pipes = [pipe for pipe in self.pipes if pipe['x'] + self.pipe_width > 0]
-        
-        # Add new pipes if needed
-        if len(self.pipes) < self.num_pipes:
-            last_pipe = max(self.pipes, key=lambda p: p['x']) if self.pipes else {'x': 0}
-            new_pipe_x = max(last_pipe['x'] + self.window_width // 2, self.window_width)
-            new_pipe_y = np.random.randint(self.min_pipe_y, self.window_height - self.pipe_gap - self.min_pipe_y)
-            self.pipes.append({'x': new_pipe_x, 'y': new_pipe_y})
-        
-        # Update score
-        for pipe in self.pipes:
-            if self.bird_x > pipe['x'] + self.pipe_width and not hasattr(pipe, 'passed'):
-                pipe['passed'] = True
-                self.score += 1
-    
     def _get_state(self):
-        # Find the nearest pipe
-        nearest_pipe = None
-        for pipe in self.pipes:
-            if pipe['x'] + self.pipe_width > self.bird_x:
-                if nearest_pipe is None or pipe['x'] < nearest_pipe['x']:
-                    nearest_pipe = pipe
-        
-        if nearest_pipe is None:
-            # If no pipe ahead, use a default value
-            nearest_pipe_dist = self.window_width
-            nearest_pipe_y = self.window_height // 2
-        else:
-            nearest_pipe_dist = nearest_pipe['x'] - self.bird_x
-            nearest_pipe_y = nearest_pipe['y']
-        
-        # Normalize observations for better learning
-        state = np.array([
-            self.bird_y / self.window_height,  # Bird y-position (normalized)
-            self.bird_velocity / self.max_velocity,  # Bird velocity (normalized)
-            nearest_pipe_dist / self.window_width,  # Horizontal distance to pipe (normalized)
-            nearest_pipe_y / self.window_height  # Height of pipe gap (normalized)
-        ], dtype=np.float32)
-        
-        return state
+        if len(self.pipes) > 0:
+            next_pipe = self.pipes[0]
+            return np.array([
+                self.bird.y,
+                self.bird.vel,
+                next_pipe.height,
+                next_pipe.x - self.bird.x
+            ], dtype=np.float32)
+        return np.zeros(4, dtype=np.float32)
     
     def render(self):
-        # This is a simplified render method since we're not using pygame in the Docker container
-        if self.render_mode == 'human':
-            print(f"Bird position: ({self.bird_x}, {self.bird_y}), Velocity: {self.bird_velocity}, Score: {self.score}")
+        # Draw background
+        self.win.blit(self.bg_img, (0, 0))
+        
+        # Draw pipes
+        for pipe in self.pipes:
+            pipe.draw(self.win)
             
+        # Draw base and bird
+        self.base.draw(self.win)
+        self.bird.draw(self.win)
+        
+        # Draw score
+        score_font = pygame.font.SysFont("comicsans", 50)
+        score_label = score_font.render(f"Score: {self.score}", 1, (255, 255, 255))
+        self.win.blit(score_label, (self.win_width - score_label.get_width() - 15, 10))
+        
+        pygame.display.update()
+        self.clock.tick(30)  # 30 FPS
+        
+        # Convert surface to string for transmission
+        return pygame.image.tostring(self.win, 'RGB')
+    
     def close(self):
-        pass
+        pygame.quit()
 
 # For compatibility with gym.make
 def make_env():

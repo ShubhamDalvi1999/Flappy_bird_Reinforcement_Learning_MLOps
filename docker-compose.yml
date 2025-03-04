@@ -13,16 +13,13 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - MLFLOW_TRACKING_URI=http://mlflow:5000
-      - WANDB_API_KEY=${WANDB_API_KEY}
-      - WANDB_PROJECT=${WANDB_PROJECT}
+      - WANDB_API_KEY=${WANDB_API_KEY:-}
+      - WANDB_PROJECT=${WANDB_PROJECT:-flappy-bird-rl}
       - WANDB_ENTITY=${WANDB_ENTITY:-}
       - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-}
       - NVIDIA_DRIVER_CAPABILITIES=${NVIDIA_DRIVER_CAPABILITIES:-}
       - TF_FORCE_GPU_ALLOW_GROWTH=true
       - DOCKER_ENV=1
-      - GUNICORN_WORKERS=2
-      - GUNICORN_THREADS=4
-      - GUNICORN_TIMEOUT=120
     deploy:
       resources:
         reservations:
@@ -31,17 +28,34 @@ services:
               count: ${GPU_COUNT:-0}
               capabilities: [gpu]
     command: >
-      bash -c "pip install --no-cache-dir -r requirements.txt &&
+      bash -c "
+      echo 'Waiting for MLflow to be ready...' &&
+      for i in {1..30}; do
+        if curl -s http://mlflow:5000/health >/dev/null; then
+          echo 'MLflow is ready!'
+          break
+        fi
+        echo 'Waiting for MLflow... attempt $$i'
+        sleep 5
+        if [ $$i -eq 30 ]; then
+          echo 'Timeout waiting for MLflow'
+          exit 1
+        fi
+      done &&
       python -c 'import tensorflow as tf; print(\"GPU Available:\", len(tf.config.list_physical_devices(\"GPU\")) > 0)' &&
-      gunicorn --bind 0.0.0.0:5000 --workers ${GUNICORN_WORKERS:-2} --threads ${GUNICORN_THREADS:-4} --timeout ${GUNICORN_TIMEOUT:-120} --worker-tmp-dir /tmp app:app"
+      python app.py"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000/api/models"]
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 20s
+      start_period: 40s
+    depends_on:
+      mlflow:
+        condition: service_healthy
     networks:
       - flappy-network
+    restart: unless-stopped
 
   frontend:
     build:
@@ -49,27 +63,27 @@ services:
       dockerfile: Dockerfile
     ports:
       - "3000:80"
-    depends_on:
-      - backend
     environment:
       - NEXT_PUBLIC_API_BASE_URL=/api
+    depends_on:
+      backend:
+        condition: service_healthy
     networks:
       - flappy-network
+    restart: unless-stopped
 
   mlflow:
-    image: python:3.9-slim
+    build:
+      context: .
+      dockerfile: mlflow.Dockerfile
     ports:
       - "5001:5000"
     volumes:
       - mlflow_data:/mlflow
-    environment:
-      - MLFLOW_TRACKING_URI=/mlflow
-      - MLFLOW_DEFAULT_ARTIFACT_ROOT=${MLFLOW_DEFAULT_ARTIFACT_ROOT:-/mlflow/artifacts}
-    command: >
-      bash -c "pip install mlflow==2.10.0 && 
-      mlflow server --host 0.0.0.0 --backend-store-uri sqlite:///mlflow/mlflow.db --default-artifact-root /mlflow/artifacts"
     networks:
       - flappy-network
+    restart: unless-stopped
+    mem_limit: 512M
 
 networks:
   flappy-network:
