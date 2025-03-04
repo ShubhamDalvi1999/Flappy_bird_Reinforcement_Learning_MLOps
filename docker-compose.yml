@@ -1,0 +1,59 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./backend:/app
+    environment:
+      - PYTHONUNBUFFERED=1
+      - MLFLOW_TRACKING_URI=http://localhost:5001
+    command: >
+      bash -c "pip install --no-cache-dir -r requirements.txt &&
+      gunicorn --bind 0.0.0.0:5000 --workers 4 --timeout 120 app:app"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api/models"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    networks:
+      - flappy-network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    networks:
+      - flappy-network
+
+  mlflow:
+    image: python:3.9-slim
+    ports:
+      - "5001:5000"
+    volumes:
+      - mlflow_data:/mlflow
+    environment:
+      - MLFLOW_TRACKING_URI=/mlflow
+      - MLFLOW_DEFAULT_ARTIFACT_ROOT=/mlflow/artifacts
+    command: >
+      bash -c "pip install mlflow==2.10.0 && 
+      mlflow server --host 0.0.0.0 --backend-store-uri sqlite:///mlflow/mlflow.db --default-artifact-root /mlflow/artifacts"
+    networks:
+      - flappy-network
+
+networks:
+  flappy-network:
+    driver: bridge
+
+volumes:
+  mlflow_data:
+    driver: local 

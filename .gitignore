@@ -1,0 +1,11 @@
+docker-compose.simple.yml
+docker-compose-new.yml
+
+Dockerfile.alternative
+Dockerfile.minimal
+*.txt
+
+*.ps1
+*.bat
+*.sh
+*.pyc
