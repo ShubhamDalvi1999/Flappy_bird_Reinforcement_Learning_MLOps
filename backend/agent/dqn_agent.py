@@ -32,6 +32,9 @@ class DQNAgent:
         self.reward_history = []
         self.epsilon_history = []
         
+        # Track action distribution for W&B visualization
+        self.action_counts = {0: 0, 1: 0}
+        
         # Model saving
         self.model_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'models')
         os.makedirs(self.model_dir, exist_ok=True)
@@ -56,10 +59,16 @@ class DQNAgent:
     def act(self, state, explore=True):
         """Return action based on epsilon-greedy policy"""
         if explore and np.random.rand() <= self.epsilon:
-            return random.randrange(self.action_size)
+            action = random.randrange(self.action_size)
+            # Track action for visualization
+            self.action_counts[action] = self.action_counts.get(action, 0) + 1
+            return action
         
         act_values = self.model.predict(state.reshape(1, -1), verbose=0)
-        return np.argmax(act_values[0])
+        action = np.argmax(act_values[0])
+        # Track action for visualization
+        self.action_counts[action] = self.action_counts.get(action, 0) + 1
+        return action
     
     def replay(self, batch_size):
         """Train on random batch from memory"""
@@ -99,13 +108,23 @@ class DQNAgent:
     
     def load(self, name):
         """Load model weights"""
-        model_path = os.path.join(self.model_dir, name)
+        if name.endswith('.h5'):
+            model_path = os.path.join(self.model_dir, name)
+        else:
+            model_path = os.path.join(self.model_dir, f"{name}.h5")
+        
+        print(f"Loading model from {model_path}")
         self.model.load_weights(model_path)
         self.update_target_model()
     
     def save(self, name):
         """Save model weights"""
-        model_path = os.path.join(self.model_dir, name)
+        if name.endswith('.h5'):
+            model_path = os.path.join(self.model_dir, name)
+        else:
+            model_path = os.path.join(self.model_dir, f"{name}.h5")
+        
+        print(f"Saving model to {model_path}")
         self.model.save_weights(model_path)
     
     def get_metrics(self):
@@ -114,4 +133,51 @@ class DQNAgent:
             'loss_history': self.loss_history,
             'epsilon_history': self.epsilon_history,
             'reward_history': self.reward_history
+        }
+        
+    def get_summary(self):
+        """Get detailed summary of agent's performance for W&B reporting"""
+        # Calculate stats on loss if available
+        loss_stats = {}
+        if self.loss_history:
+            loss_stats = {
+                'min_loss': min([l for l in self.loss_history if l is not None], default=0),
+                'max_loss': max([l for l in self.loss_history if l is not None], default=0),
+                'avg_loss': np.mean([l for l in self.loss_history if l is not None]) if any(l is not None for l in self.loss_history) else 0,
+                'last_loss': next((l for l in reversed(self.loss_history) if l is not None), 0)
+            }
+        
+        # Get action distribution
+        total_actions = sum(self.action_counts.values())
+        action_distribution = {
+            f"action_{a}": {
+                "count": count,
+                "percentage": (count / total_actions * 100) if total_actions > 0 else 0
+            }
+            for a, count in self.action_counts.items()
+        }
+        
+        # Current exploration vs exploitation stats
+        exploration_stats = {
+            'current_epsilon': self.epsilon,
+            'min_epsilon': self.epsilon_min,
+            'exploration_rate': self.epsilon * 100,  # as percentage
+            'exploitation_rate': (1 - self.epsilon) * 100  # as percentage
+        }
+        
+        # Model architecture summary
+        model_summary_lines = []
+        self.model.summary(print_fn=lambda x: model_summary_lines.append(x))
+        
+        return {
+            'loss_stats': loss_stats,
+            'action_distribution': action_distribution,
+            'exploration_stats': exploration_stats,
+            'model_summary': '\n'.join(model_summary_lines),
+            'model_params': {
+                'learning_rate': self.learning_rate,
+                'gamma': self.gamma,
+                'memory_size': len(self.memory),
+                'memory_capacity': self.memory.maxlen
+            }
         } 

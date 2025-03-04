@@ -11,7 +11,19 @@ services:
       - ./backend:/app
     environment:
       - PYTHONUNBUFFERED=1
-      - MLFLOW_TRACKING_URI=http://localhost:5001
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - WANDB_API_KEY=${WANDB_API_KEY}
+      - WANDB_PROJECT=${WANDB_PROJECT}
+      - WANDB_ENTITY=${WANDB_ENTITY:-}
+      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-}
+      - NVIDIA_DRIVER_CAPABILITIES=${NVIDIA_DRIVER_CAPABILITIES:-}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     command: >
       bash -c "pip install --no-cache-dir -r requirements.txt &&
       gunicorn --bind 0.0.0.0:5000 --workers 4 --timeout 120 app:app"
@@ -43,7 +55,7 @@ services:
       - mlflow_data:/mlflow
     environment:
       - MLFLOW_TRACKING_URI=/mlflow
-      - MLFLOW_DEFAULT_ARTIFACT_ROOT=/mlflow/artifacts
+      - MLFLOW_DEFAULT_ARTIFACT_ROOT=${MLFLOW_DEFAULT_ARTIFACT_ROOT:-/mlflow/artifacts}
     command: >
       bash -c "pip install mlflow==2.10.0 && 
       mlflow server --host 0.0.0.0 --backend-store-uri sqlite:///mlflow/mlflow.db --default-artifact-root /mlflow/artifacts"

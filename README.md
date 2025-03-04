@@ -130,14 +130,25 @@ MLflow is used for experiment tracking, model versioning, and artifact storage. 
 
 ### Weights & Biases
 
-Weights & Biases provides enhanced monitoring capabilities:
+Weights & Biases is used for enhanced visualization and monitoring of training metrics. It provides:
 
-- Real-time training visualizations
-- Hyperparameter optimization
-- Model comparison
-- Alerting and project collaboration
+- Real-time training metrics visualization
+- Custom charts and histograms for performance analysis
+- Automatic tracking of GPU utilization and system metrics
+- Interactive dashboards for experiment comparison
+- Training alerts for significant events
+- Model architecture visualization
 
 Access your W&B dashboard at https://wandb.ai/ after logging in with your API key.
+
+New features include:
+- **Action Distribution Visualization**: See how often the agent chooses each action
+- **Performance Summary Tables**: Track detailed metrics in table format
+- **Histograms of Scores**: Monitor the distribution of scores over time
+- **Enhanced Model Summaries**: Get detailed insights into the agent's performance
+- **Integrated GPU Monitoring**: Track GPU utilization directly in the dashboard
+
+The application provides a built-in W&B dashboard for viewing these metrics directly within the UI without leaving the application.
 
 ## Testing
 
@@ -200,4 +211,4 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 - OpenAI for research on Deep Q-Learning
 - The PyTorch team for the deep learning framework
-- MLflow, W&B, and Apache Spark communities for their excellent tools 
+- MLflow, W&B, and Apache Spark communities for their excellent tools

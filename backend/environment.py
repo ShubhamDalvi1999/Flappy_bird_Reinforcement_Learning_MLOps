@@ -182,40 +182,61 @@ class FlappyBirdEnv(gym.Env):
     
     def render(self):
         if self.render_mode == "human":
-            # Clear the screen
-            self.screen.fill((135, 206, 235))  # Sky blue
-            
-            # Draw pipes
-            for pipe in self.pipes:
-                # Top pipe
+            try:
+                # Initialize pygame if not done yet
+                if not pygame.get_init():
+                    pygame.init()
+                    
+                # Initialize display if not done yet
+                if self.screen is None:
+                    pygame.display.init()
+                    self.screen = pygame.display.set_mode((self.screen_width, self.screen_height))
+                    pygame.display.set_caption("Flappy Bird RL")
+                    
+                # Initialize clock if not done yet
+                if self.clock is None:
+                    self.clock = pygame.time.Clock()
+                    
+                # Clear the screen
+                self.screen.fill((135, 206, 235))  # Sky blue
+                
+                # Draw pipes
+                for pipe in self.pipes:
+                    # Top pipe
+                    pygame.draw.rect(
+                        self.screen, 
+                        (0, 128, 0),  # Green
+                        (pipe['x'], 0, self.pipe_width, pipe['y'])
+                    )
+                    
+                    # Bottom pipe
+                    pygame.draw.rect(
+                        self.screen, 
+                        (0, 128, 0),  # Green
+                        (pipe['x'], pipe['y'] + self.pipe_gap, self.pipe_width, self.screen_height - pipe['y'] - self.pipe_gap)
+                    )
+                
+                # Draw bird
                 pygame.draw.rect(
                     self.screen, 
-                    (0, 128, 0),  # Green
-                    (pipe['x'], 0, self.pipe_width, pipe['y'])
+                    (255, 255, 0),  # Yellow
+                    (self.screen_width // 4, self.bird_y, self.bird_width, self.bird_height)
                 )
                 
-                # Bottom pipe
-                pygame.draw.rect(
-                    self.screen, 
-                    (0, 128, 0),  # Green
-                    (pipe['x'], pipe['y'] + self.pipe_gap, self.pipe_width, self.screen_height - pipe['y'] - self.pipe_gap)
-                )
-            
-            # Draw bird
-            pygame.draw.rect(
-                self.screen, 
-                (255, 255, 0),  # Yellow
-                (self.screen_width // 4, self.bird_y, self.bird_width, self.bird_height)
-            )
-            
-            # Display score
-            font = pygame.font.Font(None, 36)
-            score_text = font.render(f"Score: {self.score}", True, (0, 0, 0))
-            self.screen.blit(score_text, (10, 10))
-            
-            pygame.display.flip()
-            self.clock.tick(self.metadata["render_fps"])
-            
+                # Display score
+                font = pygame.font.Font(None, 36)
+                score_text = font.render(f"Score: {self.score}", True, (0, 0, 0))
+                self.screen.blit(score_text, (10, 10))
+                
+                pygame.display.flip()
+                self.clock.tick(self.metadata["render_fps"])
+            except pygame.error as e:
+                print(f"Rendering unavailable: {e}. Running in non-render mode.")
+                self.render_mode = None
+            except Exception as e:
+                print(f"Error during rendering: {e}. Running in non-render mode.")
+                self.render_mode = None
+    
     def close(self):
         if self.screen is not None:
             pygame.display.quit()

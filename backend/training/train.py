@@ -57,29 +57,85 @@ class TrainingManager:
                 batch_size=batch_size
             )
             
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            run_name = f"training_{timestamp}"
+            
             # Initialize MLflow
             if use_mlflow:
                 mlflow.set_experiment("flappy_bird_rl")
-                mlflow.start_run(run_name=f"training_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+                mlflow.start_run(run_name=run_name)
                 mlflow.log_param("episodes", episodes)
                 mlflow.log_param("batch_size", batch_size)
                 mlflow.log_param("learning_rate", self.agent.learning_rate)
                 mlflow.log_param("gamma", self.agent.gamma)
                 mlflow.log_param("hidden_sizes", str(self.agent.hidden_sizes))
             
-            # Initialize W&B
+            # Initialize W&B with enhanced configuration
             if use_wandb:
-                wandb.init(
-                    project="flappy_bird_rl",
-                    name=f"training_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
-                    config={
-                        "episodes": episodes,
-                        "batch_size": batch_size,
-                        "learning_rate": self.agent.learning_rate,
-                        "gamma": self.agent.gamma,
-                        "hidden_sizes": self.agent.hidden_sizes
+                try:
+                    # Import system metrics libraries
+                    import psutil
+                    import platform
+                    
+                    # Get system information for tracking
+                    system_info = {
+                        "cpu_count": psutil.cpu_count(),
+                        "memory_total": psutil.virtual_memory().total / (1024 ** 3),  # GB
+                        "platform": platform.platform(),
+                        "python_version": platform.python_version()
                     }
-                )
+                    
+                    # Try to get GPU information
+                    try:
+                        import tensorflow as tf
+                        gpus = tf.config.list_physical_devices('GPU')
+                        system_info["gpu_available"] = len(gpus) > 0
+                        system_info["gpu_count"] = len(gpus)
+                        system_info["tf_version"] = tf.__version__
+                    except:
+                        system_info["gpu_available"] = False
+                    
+                    # Initialize W&B with detailed configuration
+                    wandb.init(
+                        project="flappy-bird-rl",
+                        name=run_name,
+                        config={
+                            # Agent parameters
+                            "episodes": episodes,
+                            "batch_size": batch_size,
+                            "learning_rate": self.agent.learning_rate,
+                            "gamma": self.agent.gamma,
+                            "epsilon_start": self.agent.epsilon,
+                            "epsilon_min": self.agent.epsilon_min,
+                            "epsilon_decay": self.agent.epsilon_decay,
+                            "memory_size": len(self.agent.memory),
+                            
+                            # Model architecture
+                            "model_architecture": "DQN",
+                            "hidden_layers": str(self.agent.hidden_sizes),
+                            
+                            # Environment settings
+                            "env_name": "FlappyBird",
+                            "state_size": self.env.state_size,
+                            "action_size": self.env.action_size,
+                            
+                            # System information
+                            "system": system_info
+                        }
+                    )
+                    
+                    # Log model architecture as a summary
+                    wandb.run.summary["model_summary"] = str(self.agent.model.summary())
+                    
+                    # Set up W&B Alerts
+                    wandb.alert(
+                        title="Training Started",
+                        text=f"Training has started with {episodes} episodes and batch size {batch_size}",
+                        level=wandb.AlertLevel.INFO
+                    )
+                except Exception as e:
+                    print(f"Error initializing W&B: {e}")
+                    use_wandb = False
             
             # Training loop
             scores = []
@@ -138,13 +194,47 @@ class TrainingManager:
                     mlflow.log_metric("avg_score_last_100", np.mean(scores[-100:]), step=episode)
                 
                 if use_wandb:
-                    wandb.log({
+                    # Enhanced W&B logging with more visualization types
+                    wandb_log_data = {
                         "episode": episode,
                         "score": score,
                         "epsilon": self.agent.epsilon,
                         "loss": loss if loss is not None else 0,
-                        "avg_score_last_100": np.mean(scores[-100:])
-                    })
+                        "avg_score_last_100": np.mean(scores[-100:]) if len(scores) >= 100 else np.mean(scores)
+                    }
+                    
+                    # Add histogram of recent scores every 10 episodes
+                    if episode % 10 == 0 and len(scores) >= 10:
+                        recent_scores = scores[-100:] if len(scores) >= 100 else scores
+                        wandb_log_data["score_histogram"] = wandb.Histogram(recent_scores)
+                        
+                        # Add action distribution as pie chart
+                        if hasattr(self.agent, 'action_counts'):
+                            action_labels = ["Do nothing", "Flap"]
+                            wandb_log_data["action_distribution"] = wandb.plot.pie_chart(
+                                labels=action_labels,
+                                values=[self.agent.action_counts.get(0, 0), self.agent.action_counts.get(1, 0)],
+                                title="Action Distribution"
+                            )
+                    
+                    # Create a custom chart showing multiple metrics
+                    if episode % 25 == 0:
+                        # Create a performance summary table
+                        performance_data = []
+                        for i in range(max(1, episode-25), episode+1):
+                            if i < len(scores):  # Ensure index is valid
+                                row = [i, scores[i], epsilons[i], losses[i] if i < len(losses) and losses[i] is not None else 0]
+                                performance_data.append(row)
+                        
+                        if performance_data:
+                            performance_table = wandb.Table(
+                                columns=["Episode", "Score", "Epsilon", "Loss"],
+                                data=performance_data
+                            )
+                            wandb_log_data["performance_summary"] = performance_table
+                    
+                    # Log all the data to W&B
+                    wandb.log(wandb_log_data)
                 
                 # Save progress data
                 self.training_stats.append({
@@ -186,6 +276,53 @@ class TrainingManager:
                 mlflow.end_run()
             
             if use_wandb:
+                # Log final summary data to W&B
+                agent_summary = self.agent.get_summary()
+                
+                # Log final model summary
+                wandb.run.summary.update({
+                    "final_epsilon": self.agent.epsilon,
+                    "best_score": self.best_score,
+                    "final_memory_size": len(self.agent.memory),
+                    "total_episodes": episodes
+                })
+                
+                # Create a summary of loss metrics
+                if "loss_stats" in agent_summary:
+                    wandb.run.summary.update(agent_summary["loss_stats"])
+                
+                # Create a final action distribution chart
+                if total_actions := sum(self.agent.action_counts.values()):
+                    action_labels = ["Do nothing", "Flap"]
+                    action_values = [
+                        self.agent.action_counts.get(0, 0) / total_actions * 100,
+                        self.agent.action_counts.get(1, 0) / total_actions * 100
+                    ]
+                    action_chart = wandb.plot.bar(
+                        wandb.Table(
+                            columns=["Action", "Percentage"], 
+                            data=[[action_labels[i], action_values[i]] for i in range(len(action_labels))]
+                        ),
+                        "Action", "Percentage",
+                        title="Final Action Distribution (%)"
+                    )
+                    wandb.log({"final_action_distribution": action_chart})
+                
+                # Create a performance over time chart
+                if len(scores) > 0:
+                    score_progress = wandb.plot.line(
+                        wandb.Table(
+                            columns=["episode", "score", "avg_score"],
+                            data=[[i+1, scores[i], 
+                                  np.mean(scores[max(0, i-99):i+1])] 
+                                  for i in range(len(scores))]
+                        ),
+                        "episode", "score",
+                        title="Score Progress"
+                    )
+                    wandb.log({"score_progress_chart": score_progress})
+                
+                # Finish the W&B run
                 wandb.finish()
             
             self.message = "Training completed"
