@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     git \
     curl \
-    openjdk-17-jre-headless \
+    default-jre-headless \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -24,15 +24,21 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy backend code
 COPY backend/ /app/
 
-# Create directories for models, data, and logs
-RUN mkdir -p /app/models /app/data /app/logs
+# Create directories for models, data, logs, and ensure proper permissions
+RUN mkdir -p /app/models /app/data /app/logs /tmp/gunicorn && \
+    chmod -R 777 /app/models /app/data /app/logs /tmp/gunicorn
 
 # Make port 5000 available for the app
 EXPOSE 5000
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
-ENV MLFLOW_TRACKING_URI=http://localhost:5000
+ENV MLFLOW_TRACKING_URI=http://mlflow:5000
+ENV DOCKER_ENV=1
+ENV TF_FORCE_GPU_ALLOW_GROWTH=true
+ENV GUNICORN_WORKERS=2
+ENV GUNICORN_THREADS=4
+ENV GUNICORN_TIMEOUT=120
 
 # Run app with gunicorn
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "4", "--timeout", "120", "app:app"] 
+CMD ["sh", "-c", "gunicorn --bind 0.0.0.0:5000 --workers ${GUNICORN_WORKERS} --threads ${GUNICORN_THREADS} --timeout ${GUNICORN_TIMEOUT} --worker-tmp-dir /tmp/gunicorn app:app"] 

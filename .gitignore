@@ -9,3 +9,11 @@ Dockerfile.minimal
 *.bat
 *.sh
 *.pyc
+
+*.env
+*.json
+*.yaml
+*.yml
+*.jsonl
+*.jsonl.gz
+*.jsonl.gz.part

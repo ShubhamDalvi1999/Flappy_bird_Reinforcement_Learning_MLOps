@@ -4,11 +4,12 @@ services:
   backend:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: ${USE_GPU:-Dockerfile}
     ports:
       - "5000:5000"
     volumes:
       - ./backend:/app
+      - tmpfs_data:/tmp
     environment:
       - PYTHONUNBUFFERED=1
       - MLFLOW_TRACKING_URI=http://mlflow:5000
@@ -17,16 +18,22 @@ services:
       - WANDB_ENTITY=${WANDB_ENTITY:-}
       - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-}
       - NVIDIA_DRIVER_CAPABILITIES=${NVIDIA_DRIVER_CAPABILITIES:-}
+      - TF_FORCE_GPU_ALLOW_GROWTH=true
+      - DOCKER_ENV=1
+      - GUNICORN_WORKERS=2
+      - GUNICORN_THREADS=4
+      - GUNICORN_TIMEOUT=120
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              count: 1
+              count: ${GPU_COUNT:-0}
               capabilities: [gpu]
     command: >
       bash -c "pip install --no-cache-dir -r requirements.txt &&
-      gunicorn --bind 0.0.0.0:5000 --workers 4 --timeout 120 app:app"
+      python -c 'import tensorflow as tf; print(\"GPU Available:\", len(tf.config.list_physical_devices(\"GPU\")) > 0)' &&
+      gunicorn --bind 0.0.0.0:5000 --workers ${GUNICORN_WORKERS:-2} --threads ${GUNICORN_THREADS:-4} --timeout ${GUNICORN_TIMEOUT:-120} --worker-tmp-dir /tmp app:app"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/api/models"]
       interval: 30s
@@ -44,6 +51,8 @@ services:
       - "3000:80"
     depends_on:
       - backend
+    environment:
+      - NEXT_PUBLIC_API_BASE_URL=/api
     networks:
       - flappy-network
 
@@ -68,4 +77,9 @@ networks:
 
 volumes:
   mlflow_data:
-    driver: local 
+    driver: local
+  tmpfs_data:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs 
