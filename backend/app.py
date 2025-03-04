@@ -7,7 +7,6 @@ import time
 import threading
 import mlflow
 import wandb
-from pyspark.sql import SparkSession
 from game.flappy_bird import FlappyBirdEnv
 from agent.dqn_agent import DQNAgent
 from training.train import TrainingManager
@@ -17,7 +16,8 @@ from wandb_config import init_wandb
 
 app = Flask(__name__)
 CORS(app)
-socketio = SocketIO(app, cors_allowed_origins="*")
+# Configure SocketIO with proper CORS settings
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet', logger=True, engineio_logger=True)
 
 # Initialize MLflow - use environment variable or default to mlflow container
 tracking_uri = os.environ.get("MLFLOW_TRACKING_URI", "http://mlflow:5000")
@@ -142,51 +142,26 @@ game_session = {
     "state": None
 }
 
-# Spark session for data analysis
-spark = None
-
-def init_spark():
-    global spark
-    if spark is None:
-        spark = SparkSession.builder \
-            .appName("FlappyBirdAnalytics") \
-            .config("spark.executor.memory", "2g") \
-            .config("spark.driver.memory", "2g") \
-            .getOrCreate()
-    return spark
-
 def initialize_mlflow():
-    """Initialize MLflow configuration and create default experiment"""
+    """Initialize MLflow tracking"""
     try:
-        # Set up MLflow tracking URI
+        # Set tracking URI
         tracking_uri = os.environ.get("MLFLOW_TRACKING_URI", "http://mlflow:5000")
         mlflow.set_tracking_uri(tracking_uri)
         print(f"MLflow tracking URI set to: {tracking_uri}")
         
-        # Create default experiment if it doesn't exist
+        # Create experiment if it doesn't exist
         experiment_name = "flappy-bird-rl"
-        try:
-            experiment = mlflow.get_experiment_by_name(experiment_name)
-            if experiment is None:
-                experiment_id = mlflow.create_experiment(
-                    experiment_name,
-                    artifact_location=os.environ.get("MLFLOW_DEFAULT_ARTIFACT_ROOT", "/mlflow/artifacts")
-                )
-                print(f"Created new MLflow experiment with ID: {experiment_id}")
-            else:
-                print(f"Using existing MLflow experiment: {experiment.experiment_id}")
-        except Exception as e:
-            print(f"Error setting up MLflow experiment: {e}")
-            # Create a fallback experiment
-            try:
-                experiment_id = mlflow.create_experiment("Default")
-                print(f"Created fallback MLflow experiment with ID: {experiment_id}")
-            except:
-                print("Failed to create fallback experiment")
+        experiment = mlflow.get_experiment_by_name(experiment_name)
+        if experiment is None:
+            mlflow.create_experiment(experiment_name)
+            print(f"Created MLflow experiment: {experiment_name}")
+        else:
+            print(f"Using existing MLflow experiment: {experiment_name}")
         
         return True
     except Exception as e:
-        print(f"Error initializing MLflow: {e}")
+        print(f"Error initializing MLflow: {str(e)}")
         return False
 
 def initialize_app():
@@ -199,6 +174,11 @@ def initialize_app():
     mlflow_initialized = initialize_mlflow()
     if not mlflow_initialized:
         print("Warning: MLflow initialization failed")
+    
+    # Initialize training manager
+    training_manager_initialized = init_training_manager()
+    if not training_manager_initialized:
+        print("Warning: Training manager initialization failed")
     
     # Create a default model if none exists
     model_files = [f for f in os.listdir(models_dir) if f.endswith('.h5') or f.endswith('.pth')]
@@ -282,14 +262,10 @@ def start_training():
         
         # Get optional configuration
         model_id = data.get('model_id')
-        config = {
-            'learning_rate': data.get('learning_rate'),
-            'batch_size': data.get('batch_size'),
-            'epsilon_decay': data.get('epsilon_decay'),
-            'early_stopping': data.get('early_stopping', True),
-            'target_score': data.get('target_score'),
-            'checkpoint_interval': data.get('checkpoint_interval', 100)
-        }
+        batch_size = data.get('batch_size', 32)
+        run_name = data.get('run_name')
+        use_wandb = data.get('use_wandb', True)
+        use_mlflow = data.get('use_mlflow', True)
         
         # Validate model_id if provided
         if model_id:
@@ -307,15 +283,17 @@ def start_training():
         # Start training in a background thread
         def train_async():
             try:
-                new_model_id = training_manager.train(
-                    num_episodes=episodes,
+                success, message = training_manager.train(
+                    episodes=episodes,
+                    batch_size=batch_size,
                     model_id=model_id,
-                    config=config
+                    run_name=run_name,
+                    use_wandb=use_wandb,
+                    use_mlflow=use_mlflow
                 )
                 socketio.emit('training_complete', {
-                    'status': 'success',
-                    'message': 'Training completed successfully',
-                    'model_id': new_model_id
+                    'status': 'success' if success else 'error',
+                    'message': message
                 })
             except Exception as e:
                 socketio.emit('training_error', {
@@ -333,8 +311,10 @@ def start_training():
             "base_model": model_id if model_id else "new",
             "config": {
                 "episodes": episodes,
+                "batch_size": batch_size,
                 "estimated_time_seconds": estimated_time,
-                **{k: v for k, v in config.items() if v is not None}
+                "use_wandb": use_wandb,
+                "use_mlflow": use_mlflow
             }
         })
         
@@ -667,10 +647,9 @@ def stop_game():
 
 @app.route('/api/analytics/summary', methods=['GET'])
 def get_analytics_summary():
-    """Get analytics summary using Spark"""
+    """Get analytics summary using pandas"""
     try:
-        spark = init_spark()
-        
+        # Use pandas instead of Spark for analytics
         # This would typically analyze real data, but for now just a placeholder
         summary = {
             'total_games': 1250,
@@ -747,6 +726,193 @@ def catch_all(path):
     # This assumes MLflow UI is available at port 5000
     # In a real deployment, you might use nginx or a similar server for this
     return f"MLflow UI is available at <a href='/mlflow/'>/mlflow/</a>"
+
+@app.route('/api/training/status', methods=['GET'])
+def get_training_status():
+    """Get current training status"""
+    if not init_training_manager():
+        return jsonify({
+            "status": "error",
+            "message": "Training manager not initialized"
+        })
+    
+    try:
+        is_training = training_manager.is_training
+        message = "Training in progress" if is_training else "Not training"
+        
+        # Get additional stats if available
+        stats = None
+        if hasattr(training_manager, 'episode_rewards') and training_manager.episode_rewards:
+            stats = {
+                'episodes_completed': len(training_manager.episode_rewards),
+                'latest_reward': training_manager.episode_rewards[-1] if training_manager.episode_rewards else 0,
+                'latest_score': training_manager.episode_scores[-1] if training_manager.episode_scores else 0,
+                'best_score': training_manager.best_score
+            }
+        
+        return jsonify({
+            "status": "success",
+            "is_training": is_training,
+            "message": message,
+            "stats": stats
+        })
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        })
+
+@app.route('/api/training/start', methods=['POST'])
+def start_training_with_viz():
+    """Start training with visualization enabled"""
+    if not init_training_manager():
+        return jsonify({
+            "status": "error",
+            "message": "Training manager not initialized"
+        })
+    
+    try:
+        data = request.get_json() or {}
+        
+        # Get training parameters
+        episodes = data.get('episodes', 1000)
+        batch_size = data.get('batch_size', 32)
+        model_id = data.get('model_id')
+        save_interval = data.get('save_interval', 100)
+        
+        # Start training in a background thread
+        def train_async():
+            try:
+                success, message = training_manager.train(
+                    episodes=episodes,
+                    batch_size=batch_size,
+                    model_id=model_id,
+                    run_name=f"training_{int(time.time())}",
+                    use_wandb=True,
+                    use_mlflow=True
+                )
+                socketio.emit('training_complete', {
+                    'status': 'success' if success else 'error',
+                    'message': message
+                })
+            except Exception as e:
+                socketio.emit('training_error', {
+                    'status': 'error',
+                    'message': str(e)
+                })
+        
+        thread = threading.Thread(target=train_async)
+        thread.daemon = True
+        thread.start()
+        
+        return jsonify({
+            "status": "success",
+            "message": "Training started with visualization",
+            "config": {
+                "episodes": episodes,
+                "batch_size": batch_size,
+                "model_id": model_id,
+                "save_interval": save_interval
+            }
+        })
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        })
+
+@app.route('/api/test/socket', methods=['GET'])
+def test_socket_connection():
+    """Test WebSocket connection by emitting a test frame"""
+    try:
+        # Create a simple test image
+        import pygame
+        import io
+        import base64
+        
+        # Initialize pygame
+        if not pygame.get_init():
+            pygame.init()
+        
+        # Create a test surface
+        width, height = 400, 600
+        test_surface = pygame.Surface((width, height))
+        test_surface.fill((135, 206, 235))  # Sky blue background
+        
+        # Draw some shapes
+        pygame.draw.circle(test_surface, (255, 255, 0), (width//2, height//2), 50)  # Yellow circle
+        font = pygame.font.SysFont("Arial", 30)
+        text = font.render("WebSocket Test", True, (0, 0, 0))
+        test_surface.blit(text, (width//2 - text.get_width()//2, height//2 - text.get_height()//2))
+        
+        # Convert to base64
+        buffer = io.BytesIO()
+        pygame.image.save(test_surface, buffer, "PNG")
+        buffer.seek(0)
+        img_base64 = base64.b64encode(buffer.read()).decode('utf-8')
+        
+        # Emit test frame
+        socketio.emit('game_frame', {
+            'frame': img_base64,
+            'score': 0,
+            'episode': 0,
+            'epsilon': 1.0
+        })
+        
+        # Emit test training progress
+        socketio.emit('training_progress', {
+            'episode': 1,
+            'total_episodes': 100,
+            'score': 0,
+            'reward': 0,
+            'best_score': 0,
+            'epsilon': 1.0
+        })
+        
+        return jsonify({
+            "status": "success",
+            "message": "Test frame emitted via WebSocket"
+        })
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        })
+
+@app.route('/api/training/stop', methods=['POST'])
+def stop_training_viz():
+    """Stop the current training process"""
+    if not init_training_manager():
+        return jsonify({
+            "status": "error",
+            "message": "Training manager not initialized"
+        })
+    
+    try:
+        # Set is_training to False to stop the training loop
+        if hasattr(training_manager, 'is_training'):
+            training_manager.is_training = False
+            
+            # Emit training stopped event
+            socketio.emit('training_complete', {
+                'status': 'success',
+                'message': 'Training stopped by user'
+            })
+            
+            return jsonify({
+                "status": "success",
+                "message": "Training stopped"
+            })
+        else:
+            return jsonify({
+                "status": "error",
+                "message": "Training manager does not have is_training attribute"
+            })
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        })
 
 if __name__ == '__main__':
     # Set MLflow tracking URI

@@ -1,0 +1,36 @@
+FROM tensorflow/tensorflow:2.10.0-gpu
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    libsdl2-2.0-0 \
+    libsdl2-image-2.0-0 \
+    libsdl2-ttf-2.0-0 \
+    libsdl2-mixer-2.0-0 \
+    xvfb \
+    curl \
+    python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy requirements and install dependencies
+COPY backend/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy backend code
+COPY backend/ /app/
+
+# Create necessary directories
+RUN mkdir -p /app/models /app/logs /app/imgs
+
+# Set environment variables for headless rendering and GPU
+ENV SDL_VIDEODRIVER=dummy
+ENV DISPLAY=:99
+ENV PYTHONUNBUFFERED=1
+ENV TF_FORCE_GPU_ALLOW_GROWTH=true
+
+# Expose port
+EXPOSE 5000
+
+# Start the application with Xvfb for headless rendering
+CMD ["xvfb-run", "-a", "python", "app.py"] 

@@ -4,6 +4,8 @@ import random
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
+import io
+import base64
 
 pygame.init()
 
@@ -299,8 +301,14 @@ class FlappyBirdEnv(gym.Env):
         pygame.display.update()
         self.clock.tick(30)  # 30 FPS
         
-        # Convert surface to string for transmission
-        return pygame.image.tostring(self.win, 'RGB')
+        # Convert surface to PNG for transmission
+        # Create a byte buffer and save the pygame surface as a PNG
+        buffer = io.BytesIO()
+        pygame.image.save(self.win, buffer, "PNG")
+        buffer.seek(0)
+        
+        # Return the raw bytes for the caller to encode if needed
+        return buffer.read()
     
     def close(self):
         pygame.quit()

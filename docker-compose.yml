@@ -4,86 +4,52 @@ services:
   backend:
     build:
       context: .
-      dockerfile: ${USE_GPU:-Dockerfile}
+      dockerfile: Dockerfile.backend
     ports:
       - "5000:5000"
     volumes:
       - ./backend:/app
-      - tmpfs_data:/tmp
+      - ./imgs:/app/imgs
+      - ./models:/app/models
+      - ./logs:/app/logs
     environment:
       - PYTHONUNBUFFERED=1
       - MLFLOW_TRACKING_URI=http://mlflow:5000
-      - WANDB_API_KEY=${WANDB_API_KEY:-}
-      - WANDB_PROJECT=${WANDB_PROJECT:-flappy-bird-rl}
-      - WANDB_ENTITY=${WANDB_ENTITY:-}
-      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-}
-      - NVIDIA_DRIVER_CAPABILITIES=${NVIDIA_DRIVER_CAPABILITIES:-}
-      - TF_FORCE_GPU_ALLOW_GROWTH=true
-      - DOCKER_ENV=1
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: ${GPU_COUNT:-0}
-              capabilities: [gpu]
-    command: >
-      bash -c "
-      echo 'Waiting for MLflow to be ready...' &&
-      for i in {1..30}; do
-        if curl -s http://mlflow:5000/health >/dev/null; then
-          echo 'MLflow is ready!'
-          break
-        fi
-        echo 'Waiting for MLflow... attempt $$i'
-        sleep 5
-        if [ $$i -eq 30 ]; then
-          echo 'Timeout waiting for MLflow'
-          exit 1
-        fi
-      done &&
-      python -c 'import tensorflow as tf; print(\"GPU Available:\", len(tf.config.list_physical_devices(\"GPU\")) > 0)' &&
-      python app.py"
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000/health || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
     depends_on:
-      mlflow:
-        condition: service_healthy
+      - mlflow
     networks:
       - flappy-network
-    restart: unless-stopped
 
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
     ports:
-      - "3000:80"
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
     environment:
-      - NEXT_PUBLIC_API_BASE_URL=/api
+      - NEXT_PUBLIC_API_URL=http://localhost:5000
     depends_on:
-      backend:
-        condition: service_healthy
+      - backend
     networks:
       - flappy-network
-    restart: unless-stopped
 
   mlflow:
-    build:
-      context: .
-      dockerfile: mlflow.Dockerfile
+    image: ghcr.io/mlflow/mlflow:v2.10.0
     ports:
       - "5001:5000"
     volumes:
       - mlflow_data:/mlflow
+    command: mlflow server --host 0.0.0.0 --backend-store-uri /mlflow
     networks:
       - flappy-network
-    restart: unless-stopped
-    mem_limit: 512M
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 networks:
   flappy-network:
@@ -91,9 +57,4 @@ networks:
 
 volumes:
   mlflow_data:
-    driver: local
-  tmpfs_data:
-    driver: local
-    driver_opts:
-      type: tmpfs
-      device: tmpfs 
+    driver: local 

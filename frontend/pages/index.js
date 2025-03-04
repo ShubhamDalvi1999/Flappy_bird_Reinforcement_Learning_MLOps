@@ -5,6 +5,7 @@ import GameComponent from '../components/GameComponent';
 import ModelMetrics from '../components/ModelMetrics';
 import MLflowExperiments from '../components/MLflowExperiments';
 import WandBDashboard from '../components/WandBDashboard';
+import TrainingVisualization from '../components/TrainingVisualization';
 
 // Use a relative URL for API calls
 const API_BASE_URL = '/api';
@@ -15,6 +16,7 @@ export default function Home() {
   const [isTraining, setIsTraining] = useState(false);
   const [trainingStatus, setTrainingStatus] = useState('');
   const [activeTab, setActiveTab] = useState('game');
+  const [showTrainingViz, setShowTrainingViz] = useState(false);
 
   useEffect(() => {
     // Fetch models on load
@@ -70,6 +72,7 @@ export default function Home() {
     try {
       setIsTraining(true);
       setTrainingStatus('Starting training...');
+      setShowTrainingViz(true);
       
       const response = await axios.post(`${API_BASE_URL}/training/start`, {
         episodes: 1000,
@@ -95,8 +98,10 @@ export default function Home() {
       
       if (response.data.status === 'success') {
         setTrainingStatus(response.data.message);
+        // Don't immediately set isTraining to false
+        // Wait for the status check to confirm training has stopped
       } else {
-        setTrainingStatus('Failed to stop training');
+        setTrainingStatus(`Failed to stop training: ${response.data.message}`);
       }
     } catch (error) {
       console.error('Error stopping training:', error);
@@ -175,26 +180,35 @@ export default function Home() {
                 <div className="lg:col-span-2">
                   <div className="bg-white overflow-hidden shadow rounded-lg">
                     <div className="p-6">
-                      <h2 className="text-lg font-medium text-gray-900 mb-4">Game Simulation</h2>
-                      <div className="flex items-center mb-4">
-                        <label htmlFor="model-select" className="block text-sm font-medium text-gray-700 mr-4">
-                          Select Model:
-                        </label>
-                        <select
-                          id="model-select"
-                          className="block w-full max-w-xs border-gray-300 rounded-md shadow-sm p-2 border"
-                          value={selectedModel}
-                          onChange={(e) => setSelectedModel(e.target.value)}
-                        >
-                          {models.map((model) => (
-                            <option key={model.id} value={model.id}>
-                              {model.name} ({new Date(model.created_at).toLocaleDateString()})
-                            </option>
-                          ))}
-                        </select>
-                      </div>
+                      <h2 className="text-lg font-medium text-gray-900 mb-4">
+                        {showTrainingViz ? "Training Visualization" : "Game Simulation"}
+                      </h2>
                       
-                      <GameComponent selectedModel={selectedModel} />
+                      {showTrainingViz ? (
+                        <TrainingVisualization />
+                      ) : (
+                        <>
+                          <div className="flex items-center mb-4">
+                            <label htmlFor="model-select" className="block text-sm font-medium text-gray-700 mr-4">
+                              Select Model:
+                            </label>
+                            <select
+                              id="model-select"
+                              className="block w-full max-w-xs border-gray-300 rounded-md shadow-sm p-2 border"
+                              value={selectedModel}
+                              onChange={(e) => setSelectedModel(e.target.value)}
+                            >
+                              {models.map((model) => (
+                                <option key={model.id} value={model.id}>
+                                  {model.name} ({new Date(model.created_at).toLocaleDateString()})
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                          
+                          <GameComponent selectedModel={selectedModel} />
+                        </>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -218,6 +232,24 @@ export default function Home() {
                             className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
                           >
                             Start Training
+                          </button>
+                        )}
+                        
+                        {!isTraining && showTrainingViz && (
+                          <button
+                            onClick={() => setShowTrainingViz(false)}
+                            className="ml-4 inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md shadow-sm text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                          >
+                            Show Game
+                          </button>
+                        )}
+                        
+                        {!isTraining && !showTrainingViz && (
+                          <button
+                            onClick={() => setShowTrainingViz(true)}
+                            className="ml-4 inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md shadow-sm text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                          >
+                            Show Training Viz
                           </button>
                         )}
                       </div>
@@ -248,10 +280,12 @@ export default function Home() {
                                 </div>
                                 <span 
                                   className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
-                                    model.id === selectedModel ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800'
+                                    model.id === selectedModel
+                                      ? 'bg-green-100 text-green-800'
+                                      : 'bg-gray-100 text-gray-800'
                                   }`}
                                 >
-                                  {model.id === selectedModel ? 'Selected' : 'Available'}
+                                  {model.id === selectedModel ? 'Selected' : 'Select'}
                                 </span>
                               </div>
                             </li>

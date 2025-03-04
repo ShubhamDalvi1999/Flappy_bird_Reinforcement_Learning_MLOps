@@ -1,176 +1,187 @@
-# Flappy Bird Reinforcement Learning (Production Grade)
+# Flappy Bird Reinforcement Learning
 
-A production-grade AI/ML application that uses Deep Q-Learning to train an agent to play Flappy Bird. This project demonstrates best practices for developing, deploying, and monitoring ML applications in production.
+This project implements a reinforcement learning agent that learns to play Flappy Bird using Deep Q-Learning (DQN). The project includes real-time visualization of the training process, experiment tracking with MLflow, and performance monitoring.
 
 ## Features
 
-- **Deep Q-Learning Agent**: A neural network that learns to play Flappy Bird
-- **Experiment Tracking**: MLflow integration for tracking experiments and model versions
-- **Observability**: Weights & Biases integration for real-time visualizations and alerting
-- **Scalable Data Processing**: PySpark integration for data analysis and preprocessing
-- **Testing Framework**: Pytest integration for testing models and environment
-- **Containerization**: Docker and Docker Compose for easy deployment
-- **Web Interface**: Interactive Next.js frontend for visualization and control
+- **Deep Q-Learning Agent**: Learns to play Flappy Bird through reinforcement learning
+- **Real-time Training Visualization**: Watch the agent learn in real-time
+- **Experiment Tracking**: Track experiments with MLflow and Weights & Biases
+- **Performance Monitoring**: Monitor training progress and agent performance
+- **Web Interface**: User-friendly web interface to control training and view results
+- **Docker Support**: Development and production environments with CPU/GPU options
 
-## Architecture
-
-The application consists of several components:
-
-- **Backend (Python/Flask)**: Handles training, inference, and API endpoints
-- **Frontend (Next.js)**: Provides visualization and user controls
-- **MLflow Server**: Manages experiment tracking and model registry
-
-## Quick Start
+## Getting Started
 
 ### Prerequisites
 
 - Docker and Docker Compose
-- (Optional) NVIDIA GPU with CUDA support for faster training
+- NVIDIA Docker (optional, for GPU acceleration)
+- PowerShell (for Windows users)
 
 ### Running with Docker
 
-1. **Clone the repository**
+#### Using Helper Scripts
 
-```bash
-git clone https://github.com/yourusername/flappy-bird-rl.git
-cd flappy-bird-rl
+We provide helper scripts for common Docker operations:
+
+**Windows (PowerShell):**
+```powershell
+# Load the functions (run this first)
+. .\docker-commands.ps1
+
+# Development Environment
+Start-DevApp                # Start with CPU
+Start-DevAppGPU             # Start with GPU
+Stop-App                    # Stop containers
+Show-Logs [ServiceName]     # View logs (optional service name)
+
+# Production Environment
+Start-ProdApp               # Start production with CPU
+Start-ProdAppGPU            # Start production with GPU
+Stop-ProdApp                # Stop production containers
+Show-ProdLogs [ServiceName] # View production logs
+
+# Testing
+Test-WebSocket              # Test WebSocket connection
 ```
 
-2. **Set up Weights & Biases (Optional but recommended)**
+#### Manual Docker Commands
 
-On Windows:
-```bash
-.\setup-wandb.bat
+##### Development Environment
+
+1. Build and start the containers:
+   ```bash
+   # CPU Version
+   docker-compose up --build
+   
+   # GPU Version
+   docker-compose -f docker-compose.gpu.yml up --build
+   ```
+
+2. Open your browser and navigate to `http://localhost:3000`
+
+##### Production Environment
+
+1. Build and start the production containers:
+   ```bash
+   # CPU Version
+   docker-compose -f docker-compose.prod.yml up -d --build
+   
+   # GPU Version
+   docker-compose -f docker-compose.prod.gpu.yml up -d --build
+   ```
+
+2. Open your browser and navigate to `http://localhost` (port 80)
+
+3. Stop the production containers:
+   ```bash
+   docker-compose -f docker-compose.prod.yml down
+   ```
+
+### Docker Configuration
+
+The project includes several Docker configurations:
+
+- **Development Environment**:
+  - `docker-compose.yml`: Standard development setup with CPU
+  - `docker-compose.gpu.yml`: Development setup with GPU support
+  - `frontend/Dockerfile`: Frontend development container
+  - `Dockerfile.backend`: Backend development container
+  - `Dockerfile.backend.gpu`: Backend development container with GPU support
+
+- **Production Environment**:
+  - `docker-compose.prod.yml`: Production setup with CPU
+  - `docker-compose.prod.gpu.yml`: Production setup with GPU support
+  - `frontend/Dockerfile.prod`: Frontend production container with Nginx
+
+### Project Structure
+
+- `backend/`: Python backend code
+  - `app.py`: Main Flask application
+  - `training/`: Training-related code
+    - `train.py`: Training manager and algorithms
+  - `game/`: Game environment code
+    - `flappy_bird.py`: Flappy Bird environment
+  - `models/`: Saved model files
+
+- `frontend/`: Next.js frontend code
+  - `pages/`: Next.js pages
+  - `components/`: React components
+    - `TrainingVisualization.js`: Training visualization component
+    - `GameComponent.js`: Game simulation component
+
+## Testing the Visualization
+
+To test the real-time training visualization:
+
+1. Ensure the Docker containers are running
+2. Navigate to `http://localhost:3000` (development) or `http://localhost` (production) in your browser
+3. Click on the "Start Training" button
+4. The training visualization should appear, showing:
+   - The game environment with the bird and pipes
+   - Training statistics (episode, score, etc.)
+   - A chart showing training progress
+
+You can also test the WebSocket connection directly:
+```powershell
+# Using the helper script
+Test-WebSocket
+
+# Or manually
+Invoke-WebRequest -Uri "http://localhost:5000/api/status" -Method GET
 ```
-
-On Unix/Linux:
-```bash
-export WANDB_API_KEY=your_api_key_here
-```
-
-3. **Run the application**
-
-On Windows:
-```bash
-.\run-docker.bat
-```
-
-On Unix/Linux:
-```bash
-./run-docker.sh
-```
-
-4. **Access the application**
-
-- Frontend: http://localhost:3000
-- Backend API: http://localhost:5000
-- MLflow UI: http://localhost:5001
-
-### GPU Support
-
-To check if your system supports GPU acceleration:
-
-On Windows:
-```bash
-.\check-gpu.bat
-```
-
-On Unix/Linux:
-```bash
-python -c "import tensorflow as tf; print('GPU Available:', len(tf.config.list_physical_devices('GPU')) > 0)"
-```
-
-If GPU is available, you can enable it by setting:
-```
-USE_GPU=Dockerfile.gpu
-GPU_COUNT=1
-```
-in your `.env` file.
-
-### Simplified Setup
-
-For a minimal setup without GPU support:
-
-On Windows:
-```bash
-.\run-simple.bat
-```
-
-On Unix/Linux:
-```bash
-docker-compose -f docker-compose.simple.yml up -d
-```
-
-## Project Structure
-
-```
-flappy-bird-rl/
-├── backend/                # Python backend
-│   ├── agent/              # DQN agent implementation
-│   ├── game/               # Flappy Bird environment
-│   ├── training/           # Training logic
-│   ├── tests/              # Unit tests
-│   └── app.py              # Flask API
-├── frontend/               # Next.js frontend
-│   ├── components/         # React components
-│   ├── pages/              # Next.js pages
-│   └── public/             # Static assets
-├── docker-compose.yml      # Main Docker Compose configuration
-├── docker-compose.simple.yml # Simplified Docker Compose
-├── Dockerfile              # Backend Dockerfile
-├── Dockerfile.gpu          # GPU-enabled Dockerfile
-└── .env                    # Environment variables
-```
-
-## Development
-
-### Backend Development
-
-```bash
-cd backend
-pip install -r requirements.txt
-python app.py
-```
-
-### Frontend Development
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-### Running Tests
-
-```bash
-cd backend
-pytest
-```
-
-## Monitoring and Observability
-
-- **MLflow**: Access the MLflow UI at http://localhost:5001 to view experiment tracking, model metrics, and artifacts.
-- **Weights & Biases**: Access your W&B dashboard at https://wandb.ai to view real-time training metrics, model performance, and system resource usage.
 
 ## Troubleshooting
 
-### Docker Issues
+### WebSocket Connection Issues
 
-If you encounter issues with Docker:
+If you're experiencing issues with the WebSocket connection:
 
-1. Make sure Docker and Docker Compose are installed and running
-2. Try the simplified setup with `run-simple.bat` or `docker-compose -f docker-compose.simple.yml up -d`
-3. Check Docker logs with `docker-compose logs`
+1. Check that the backend container is running:
+   ```powershell
+   docker ps | Select-String backend
+   ```
 
-### GPU Issues
+2. Check the backend logs:
+   ```powershell
+   # Development
+   Show-Logs backend
+   
+   # Production
+   Show-ProdLogs backend
+   ```
 
-If you're having trouble with GPU support:
+3. Ensure your browser supports WebSockets
+4. Check for any CORS issues in the browser console
 
-1. Run `check-gpu.bat` to verify GPU compatibility
-2. Ensure you have the latest NVIDIA drivers installed
-3. Check that CUDA and cuDNN are properly installed
-4. Try running with CPU only by setting `GPU_COUNT=0` in your `.env` file
+### GPU Not Detected
+
+If the GPU is not being detected:
+
+1. Verify NVIDIA Docker is installed correctly:
+   ```powershell
+   docker run --gpus all nvidia/cuda:11.0-base nvidia-smi
+   ```
+
+2. Check the backend logs for GPU detection:
+   ```powershell
+   # Development
+   Show-Logs backend | Select-String GPU
+   
+   # Production
+   Show-ProdLogs backend | Select-String GPU
+   ```
+
+3. Make sure your GPU drivers are up to date
 
 ## License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
+
+## Acknowledgments
+
+- OpenAI Gym for the reinforcement learning framework
+- Pygame for the game environment
+- TensorFlow for the deep learning framework
+- Next.js and React for the frontend framework 

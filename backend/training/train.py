@@ -7,9 +7,6 @@ import mlflow
 import wandb
 from datetime import datetime
 from flask_socketio import SocketIO
-from pyspark.sql import SparkSession
-from pyspark.ml.feature import VectorAssembler
-from pyspark.ml.stat import Correlation
 import base64
 
 from game.flappy_bird import FlappyBirdEnv
@@ -84,290 +81,184 @@ class TrainingManager:
         
         return True
 
-    def train(self, num_episodes=1000, model_id=None, config=None):
-        """Train the agent with enhanced configuration and monitoring"""
-        if not self.env or not self.agent or (model_id and model_id != self.current_model_id):
-            if not self.initialize_training(model_id):
-                raise Exception("Failed to initialize training")
+    def train(self, episodes=1000, batch_size=32, model_id=None, run_name=None, use_wandb=True, use_mlflow=True):
+        """Train the agent"""
+        if self.is_training:
+            return False, "Training is already in progress"
         
+        # Initialize environment and agent if not already done
+        if self.env is None or self.agent is None:
+            self.initialize_training(model_id)
+        
+        # Generate a unique model ID for this training run
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        new_model_id = f"model_{timestamp}"
+        
+        # Set up MLflow tracking
+        if use_mlflow:
+            try:
+                experiment_name = "flappy-bird-rl"
+                mlflow.set_experiment(experiment_name)
+                with mlflow.start_run(run_name=run_name or f"training_{timestamp}") as run:
+                    # Log parameters
+                    mlflow.log_param("episodes", episodes)
+                    mlflow.log_param("batch_size", batch_size)
+                    mlflow.log_param("base_model", model_id or "new")
+                    mlflow.log_param("model_id", new_model_id)
+                    
+                    # Train the agent and track metrics
+                    self._train_loop(episodes, batch_size, new_model_id, run, use_wandb)
+                    
+                    # Log the final model
+                    model_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'models', f'{new_model_id}.h5')
+                    mlflow.log_artifact(model_path)
+            except Exception as e:
+                print(f"Error with MLflow tracking: {str(e)}")
+                # Continue with training even if MLflow fails
+                self._train_loop(episodes, batch_size, new_model_id, None, use_wandb)
+        else:
+            # Train without MLflow
+            self._train_loop(episodes, batch_size, new_model_id, None, use_wandb)
+        
+        return True, f"Training completed. Model saved as {new_model_id}"
+
+    def _train_loop(self, episodes, batch_size, model_id, mlflow_run=None, use_wandb=True):
+        """Internal training loop with visualization"""
         self.is_training = True
-        start_time = time.time()
-        total_steps = 0
-        best_score = float('-inf')
-        episodes_without_improvement = 0
-        
-        # Apply configuration
-        if config:
-            if config.get('learning_rate'):
-                self.agent.learning_rate = config['learning_rate']
-            if config.get('batch_size'):
-                self.agent.batch_size = config['batch_size']
-            if config.get('epsilon_decay'):
-                self.agent.epsilon_decay = config['epsilon_decay']
+        self.episode_rewards = []
+        self.episode_scores = []
         
         try:
-            # Generate a unique model ID for this training run
-            new_model_id = f"model_{int(time.time())}"
-            
-            # Start MLflow run with proper tags
-            with mlflow.start_run() as run:
-                # Log model parameters
-                mlflow.log_params({
-                    'learning_rate': self.agent.learning_rate,
-                    'gamma': self.agent.gamma,
-                    'epsilon_start': self.agent.epsilon,
-                    'epsilon_min': self.agent.epsilon_min,
-                    'epsilon_decay': self.agent.epsilon_decay,
-                    'batch_size': self.agent.batch_size,
-                    'memory_size': len(self.agent.memory),
-                    'architecture': 'DQN',
-                    'base_model': model_id if model_id else "new",
-                    **{k: v for k, v in (config or {}).items() if v is not None}
-                })
+            for e in range(1, episodes + 1):
+                state, _ = self.env.reset()
+                state = np.reshape(state, [1, self.agent.state_size])
+                done = False
+                score = 0
+                reward_sum = 0
+                step = 0
                 
-                # Tag the run with model ID
-                mlflow.set_tag('model_id', new_model_id)
-                
-                checkpoint_interval = config.get('checkpoint_interval', 100) if config else 100
-                target_score = config.get('target_score') if config else None
-                early_stopping = config.get('early_stopping', True) if config else True
-                
-                for episode in range(num_episodes):
-                    if not self.is_training:
-                        break
-                        
-                    state, _ = self.env.reset()
-                    total_reward = 0
-                    done = False
-                    episode_loss = []
-                    episode_steps = 0
+                while not done:
+                    # Get action
+                    action = self.agent.act(state)
                     
-                    while not done and self.is_training:
-                        # Get action from agent
-                        action = self.agent.get_action(state)
-                        
-                        # Take action in environment
-                        next_state, reward, done, _, _ = self.env.step(action)
-                        
-                        # Store experience in replay memory
-                        self.agent.remember(state, action, reward, next_state, done)
-                        
-                        # Update state and accumulate reward
-                        state = next_state
-                        total_reward += reward
-                        episode_steps += 1
-                        total_steps += 1
-                        
-                        # Render the game and emit frame
-                        if self.socketio:
-                            frame = self.env.render()
+                    # Take action
+                    next_state, reward, done, _, info = self.env.step(action)
+                    next_state = np.reshape(next_state, [1, self.agent.state_size])
+                    
+                    # Render frame and emit to frontend if socketio is available
+                    if self.socketio:
+                        frame = self.env.render()
+                        if frame is not None:
+                            # Encode the frame as base64
                             frame_base64 = base64.b64encode(frame).decode('utf-8')
                             self.socketio.emit('game_frame', {
                                 'frame': frame_base64,
-                                'score': self.env.score,
-                                'episode': episode + 1,
-                                'epsilon': self.agent.epsilon,
-                                'total_episodes': num_episodes,
-                                'estimated_time_remaining': (num_episodes - episode) * (time.time() - start_time) / (episode + 1) if episode > 0 else None
+                                'score': info.get('score', 0),
+                                'episode': e,
+                                'epsilon': self.agent.epsilon
                             })
-                            time.sleep(0.033)  # ~30 FPS
-                        
-                        # Train the agent
-                        if len(self.agent.memory) > self.agent.batch_size:
-                            loss = self.agent.replay(self.agent.batch_size)
-                            if loss is not None:
-                                episode_loss.append(loss)
+                            # Slow down rendering to make it visible (30 FPS)
+                            time.sleep(0.033)
                     
-                    # Calculate average loss for the episode
-                    avg_loss = np.mean(episode_loss) if episode_loss else None
+                    # Store experience
+                    self.agent.remember(state[0], action, reward, next_state[0], done)
                     
-                    # Update best score and check for early stopping
-                    if self.env.score > best_score:
-                        best_score = self.env.score
-                        episodes_without_improvement = 0
-                        
-                        # Save best model
-                        model_path = f"models/best_model_{best_score}.h5"
-                        self.agent.save_model(model_path)
-                        mlflow.log_artifact(model_path)
-                        if self.wandb_run:
-                            wandb.save(model_path)
-                    else:
-                        episodes_without_improvement += 1
+                    # Update state and metrics
+                    state = next_state
+                    reward_sum += reward
+                    score = info.get('score', 0)
+                    step += 1
                     
-                    # Early stopping check
-                    if early_stopping and episodes_without_improvement >= 50:  # No improvement in 50 episodes
-                        print("Early stopping triggered - No improvement in 50 episodes")
-                        if self.socketio:
-                            self.socketio.emit('training_info', {
-                                'message': 'Early stopping triggered - No improvement in 50 episodes'
-                            })
-                        break
-                    
-                    # Target score check
-                    if target_score and self.env.score >= target_score:
-                        print(f"Target score {target_score} achieved!")
-                        if self.socketio:
-                            self.socketio.emit('training_info', {
-                                'message': f'Target score {target_score} achieved!'
-                            })
-                        break
-                    
-                    # Checkpoint saving
-                    if (episode + 1) % checkpoint_interval == 0:
-                        checkpoint_path = f"models/checkpoint_{new_model_id}_ep{episode + 1}.h5"
-                        self.agent.save_model(checkpoint_path)
-                        mlflow.log_artifact(checkpoint_path)
-                        if self.wandb_run:
-                            wandb.save(checkpoint_path)
-                    
-                    # Log metrics and emit progress
-                    metrics = {
-                        'episode_reward': total_reward,
-                        'score': self.env.score,
-                        'epsilon': self.agent.epsilon,
-                        'best_score': best_score,
-                        'episode_steps': episode_steps,
-                        'total_steps': total_steps,
-                        'average_score': np.mean(self.episode_scores[-100:] if self.episode_scores else [0]),
-                        'average_reward': np.mean(self.episode_rewards[-100:] if self.episode_rewards else [0])
-                    }
-                    if avg_loss is not None:
-                        metrics['loss'] = avg_loss
-                    
-                    mlflow.log_metrics(metrics, step=episode)
-                    
-                    if self.wandb_run:
-                        log_episode_metrics(
-                            episode=episode + 1,
-                            score=self.env.score,
-                            reward=total_reward,
-                            epsilon=self.agent.epsilon,
-                            loss=avg_loss
-                        )
-                    
-                    # Store episode data
-                    self.episode_rewards.append(total_reward)
-                    self.episode_scores.append(self.env.score)
-                    
-                    # Emit detailed training stats
-                    if self.socketio:
-                        self.socketio.emit('training_stats', {
-                            'episode': episode + 1,
-                            'total_episodes': num_episodes,
-                            'score': self.env.score,
-                            'reward': total_reward,
-                            'epsilon': self.agent.epsilon,
-                            'best_score': best_score,
-                            'loss': avg_loss,
-                            'estimated_time_remaining': (num_episodes - episode) * (time.time() - start_time) / (episode + 1) if episode > 0 else None,
-                            'episodes_without_improvement': episodes_without_improvement
+                    # Emit step update
+                    if self.socketio and step % 10 == 0:
+                        self.socketio.emit('training_step', {
+                            'episode': e,
+                            'step': step,
+                            'score': score,
+                            'reward': reward_sum
                         })
-                    
-                    print(f"Episode: {episode + 1}/{num_episodes}, Score: {self.env.score}, "
-                          f"Reward: {total_reward:.2f}, Epsilon: {self.agent.epsilon:.2f}"
-                          + (f", Loss: {avg_loss:.4f}" if avg_loss is not None else ""))
                 
-                # Log final metrics
-                training_time = (time.time() - start_time) / 60  # Convert to minutes
-                final_metrics = {
-                    'final_epsilon': self.agent.epsilon,
-                    'max_score': best_score,
-                    'training_time_minutes': training_time,
-                    'total_episodes': episode + 1,
-                    'total_steps': total_steps,
-                    'final_average_score': np.mean(self.episode_scores[-100:]),
-                    'final_average_reward': np.mean(self.episode_rewards[-100:]),
-                    'early_stopped': episodes_without_improvement >= 50 if early_stopping else False
-                }
-                mlflow.log_metrics(final_metrics)
+                # Train the agent
+                if len(self.agent.memory) > batch_size:
+                    self.agent.replay(batch_size)
+                
+                # Update target network periodically
+                if e % self.agent.update_target_frequency == 0:
+                    self.agent.update_target_model()
+                
+                # Track metrics
+                self.episode_rewards.append(reward_sum)
+                self.episode_scores.append(score)
+                
+                # Update best score
+                if score > self.best_score:
+                    self.best_score = score
+                
+                # Log metrics
+                if mlflow_run:
+                    mlflow.log_metric("reward", reward_sum, step=e)
+                    mlflow.log_metric("score", score, step=e)
+                    mlflow.log_metric("epsilon", self.agent.epsilon, step=e)
+                
+                if use_wandb and self.wandb_run:
+                    log_episode_metrics(self.wandb_run, e, score, reward_sum, self.agent.epsilon)
+                
+                # Emit episode update
+                if self.socketio:
+                    self.socketio.emit('training_progress', {
+                        'episode': e,
+                        'total_episodes': episodes,
+                        'score': score,
+                        'reward': reward_sum,
+                        'best_score': self.best_score,
+                        'epsilon': self.agent.epsilon
+                    })
+                
+                # Print progress
+                print(f"Episode: {e}/{episodes}, Score: {score}, Reward: {reward_sum:.2f}, Epsilon: {self.agent.epsilon:.4f}")
+                
+                # Save model periodically
+                if e % 100 == 0 or e == episodes:
+                    self.agent.save(os.path.join(os.path.dirname(os.path.dirname(__file__)), 'models', f'{model_id}.h5'))
             
-            # Save the final model
-            final_model_path = os.path.join(
-                os.path.dirname(os.path.dirname(__file__)),
-                'models',
-                f'{new_model_id}.h5'
-            )
-            self.agent.save(final_model_path)
-            mlflow.log_artifact(final_model_path)
-            
-            if self.wandb_run:
-                wandb.save(final_model_path)
-            
-            return new_model_id
+            # Save final model
+            self.agent.save(os.path.join(os.path.dirname(os.path.dirname(__file__)), 'models', f'{model_id}.h5'))
             
         except Exception as e:
-            print(f"Training interrupted: {str(e)}")
-            if self.socketio:
-                self.socketio.emit('training_error', {'error': str(e)})
-            raise e
-        
+            print(f"Error during training: {str(e)}")
         finally:
-            self.stop_training()
-            if self.wandb_run:
-                # Log final summary data
-                wandb.run.summary.update({
-                    'final_epsilon': self.agent.epsilon,
-                    'best_score': best_score,
-                    'final_memory_size': len(self.agent.memory),
-                    'total_episodes': episode + 1 if 'episode' in locals() else 0,
-                    'average_score': np.mean(self.episode_scores),
-                    'average_reward': np.mean(self.episode_rewards),
-                    'training_time_minutes': (time.time() - start_time) / 60
-                })
-                wandb.finish()
-
-    def stop_training(self):
-        """Stop the training process"""
-        self.is_training = False
-        if self.env:
-            self.env.close()
-
-    def get_training_stats(self):
-        """Get current training statistics"""
-        if not self.episode_rewards:
-            return None
+            self.is_training = False
             
-        return {
-            'total_episodes': len(self.episode_rewards),
-            'latest_reward': self.episode_rewards[-1],
-            'latest_score': self.episode_scores[-1],
-            'best_score': self.best_score,
-            'average_reward': np.mean(self.episode_rewards[-100:]),
-            'average_score': np.mean(self.episode_scores[-100:])
-        }
+        return self.episode_rewards, self.episode_scores
 
-    def analyze_training_data(self):
-        """Analyze training data using PySpark"""
-        if not self.episode_rewards:
-            return None
+    def analyze_training_data(self, data):
+        """Analyze training data using pandas instead of PySpark"""
+        try:
+            import pandas as pd
             
-        # Create SparkSession
-        spark = SparkSession.builder.appName("FlappyBirdAnalysis").getOrCreate()
-        
-        # Create DataFrame with training data
-        data = [(i, r, s) for i, (r, s) in enumerate(zip(self.episode_rewards, self.episode_scores))]
-        df = spark.createDataFrame(data, ["episode", "reward", "score"])
-        
-        # Calculate correlations
-        assembler = VectorAssembler(inputCols=["reward", "score"], outputCol="features")
-        df_vector = assembler.transform(df)
-        correlation = Correlation.corr(df_vector, "features").head()[0].toArray()
-        
-        # Calculate statistics
-        stats = df.select(
-            [
-                "reward",
-                "score"
-            ]
-        ).summary("count", "mean", "stddev", "min", "max").toPandas()
-        
-        spark.stop()
-        
-        return {
-            'correlation': correlation.tolist(),
-            'stats': json.loads(stats.to_json())
-        }
+            # Convert data to pandas DataFrame
+            df = pd.DataFrame(data, columns=["episode", "reward", "score"])
+            
+            # Calculate statistics
+            stats = {
+                "total_episodes": len(df),
+                "avg_reward": df["reward"].mean(),
+                "avg_score": df["score"].mean(),
+                "max_score": df["score"].max(),
+                "reward_trend": df["reward"].rolling(window=10).mean().tolist(),
+                "score_trend": df["score"].rolling(window=10).mean().tolist()
+            }
+            
+            # Calculate correlation
+            correlation = df[["reward", "score"]].corr().to_dict()
+            
+            return {
+                "stats": stats,
+                "correlation": correlation
+            }
+        except Exception as e:
+            print(f"Error analyzing training data: {str(e)}")
+            return {"error": str(e)}
 
 
 if __name__ == "__main__":
