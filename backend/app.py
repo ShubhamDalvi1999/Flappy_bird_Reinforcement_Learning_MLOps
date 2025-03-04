@@ -20,7 +20,7 @@ CORS(app)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet', logger=True, engineio_logger=True)
 
 # Initialize MLflow - use environment variable or default to mlflow container
-tracking_uri = os.environ.get("MLFLOW_TRACKING_URI", "http://mlflow:5000")
+tracking_uri = os.environ.get("MLFLOW_TRACKING_URI", "http://mlflow:5001")
 mlflow.set_tracking_uri(tracking_uri)
 print(f"MLflow tracking URI set to: {tracking_uri}")
 
@@ -146,7 +146,7 @@ def initialize_mlflow():
     """Initialize MLflow tracking"""
     try:
         # Set tracking URI
-        tracking_uri = os.environ.get("MLFLOW_TRACKING_URI", "http://mlflow:5000")
+        tracking_uri = os.environ.get("MLFLOW_TRACKING_URI", "http://mlflow:5001")
         mlflow.set_tracking_uri(tracking_uri)
         print(f"MLflow tracking URI set to: {tracking_uri}")
         
@@ -342,20 +342,6 @@ def get_analysis():
     if analysis is None:
         return jsonify({"status": "error", "message": "No training data available for analysis"})
     return jsonify({"status": "success", "data": analysis})
-
-@app.route('/api/wandb/status', methods=['GET'])
-def get_wandb_status():
-    try:
-        is_logged_in = wandb.api.api_key is not None
-        return jsonify({
-            "status": "success",
-            "logged_in": is_logged_in
-        })
-    except Exception as e:
-        return jsonify({
-            "status": "error",
-            "message": str(e)
-        })
 
 @app.route('/api/mlflow/experiments', methods=['GET'])
 def get_mlflow_experiments():
@@ -916,7 +902,7 @@ def stop_training_viz():
 
 if __name__ == '__main__':
     # Set MLflow tracking URI
-    mlflow.set_tracking_uri(os.getenv('MLFLOW_TRACKING_URI', 'http://mlflow:5000'))
+    mlflow.set_tracking_uri(os.getenv('MLFLOW_TRACKING_URI', 'http://mlflow:5001'))
     
     # Start the app with SocketIO
-    socketio.run(app, host='0.0.0.0', port=5000, debug=True) 
+    socketio.run(app, host='0.0.0.0', debug=True) 

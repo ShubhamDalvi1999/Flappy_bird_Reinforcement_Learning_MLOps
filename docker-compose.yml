@@ -14,7 +14,7 @@ services:
       - ./logs:/app/logs
     environment:
       - PYTHONUNBUFFERED=1
-      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - MLFLOW_TRACKING_URI=http://mlflow:5001
     depends_on:
       - mlflow
     networks:
@@ -39,14 +39,14 @@ services:
   mlflow:
     image: ghcr.io/mlflow/mlflow:v2.10.0
     ports:
-      - "5001:5000"
+      - "5001:5001"
     volumes:
       - mlflow_data:/mlflow
-    command: mlflow server --host 0.0.0.0 --backend-store-uri /mlflow
+    command: mlflow server --host 0.0.0.0 --port 5001 --backend-store-uri /mlflow
     networks:
       - flappy-network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:5001/health"]
       interval: 10s
       timeout: 5s
       retries: 5
