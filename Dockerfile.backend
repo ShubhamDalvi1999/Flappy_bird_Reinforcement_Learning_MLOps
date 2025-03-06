@@ -1,13 +1,10 @@
 FROM python:3.9-slim
 
-# Install system dependencies
+# Install only the necessary system dependencies
 RUN apt-get update && apt-get install -y \
     libsdl2-2.0-0 \
     libsdl2-image-2.0-0 \
-    libsdl2-ttf-2.0-0 \
-    libsdl2-mixer-2.0-0 \
     xvfb \
-    curl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -21,6 +18,9 @@ COPY backend/ /app/
 
 # Create necessary directories
 RUN mkdir -p /app/models /app/logs /app/imgs
+
+# Make startup script executable
+RUN chmod +x /app/start.sh
 
 # Set environment variables for headless rendering
 ENV SDL_VIDEODRIVER=dummy

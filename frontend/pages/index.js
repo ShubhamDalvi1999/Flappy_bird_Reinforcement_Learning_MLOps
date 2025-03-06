@@ -3,8 +3,6 @@ import Head from 'next/head';
 import axios from 'axios';
 import GameComponent from '../components/GameComponent';
 import ModelMetrics from '../components/ModelMetrics';
-import MLflowExperiments from '../components/MLflowExperiments';
-import WandBDashboard from '../components/WandBDashboard';
 import TrainingVisualization from '../components/TrainingVisualization';
 
 // Use a relative URL for API calls
@@ -98,10 +96,8 @@ export default function Home() {
       
       if (response.data.status === 'success') {
         setTrainingStatus(response.data.message);
-        // Don't immediately set isTraining to false
-        // Wait for the status check to confirm training has stopped
       } else {
-        setTrainingStatus(`Failed to stop training: ${response.data.message}`);
+        setTrainingStatus('Failed to stop training');
       }
     } catch (error) {
       console.error('Error stopping training:', error);
@@ -112,207 +108,128 @@ export default function Home() {
   return (
     <div className="min-h-screen bg-gray-100">
       <Head>
-        <title>Flappy Bird RL - Production Ready</title>
+        <title>Flappy Bird RL</title>
+        <meta name="description" content="Flappy Bird Reinforcement Learning" />
         <link rel="icon" href="/favicon.ico" />
       </Head>
 
-      <main className="py-10">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="text-center mb-8">
-            <h1 className="text-3xl font-extrabold text-gray-900 sm:text-4xl">
-              Flappy Bird Reinforcement Learning
-            </h1>
-            <p className="mt-3 max-w-2xl mx-auto text-xl text-gray-500 sm:mt-4">
-              A production-grade AI application using MLflow, Weights & Biases, and PySpark
-            </p>
+      <main className="container mx-auto px-4 py-8">
+        <h1 className="text-4xl font-bold text-center mb-8">Flappy Bird Reinforcement Learning</h1>
+        
+        {/* Navigation Tabs */}
+        <div className="flex justify-center mb-6">
+          <div className="flex space-x-2 bg-white rounded-lg shadow-md p-1">
+            <button
+              className={`px-4 py-2 rounded-md ${activeTab === 'game' ? 'bg-blue-500 text-white' : 'text-gray-700 hover:bg-gray-100'}`}
+              onClick={() => setActiveTab('game')}
+            >
+              Game
+            </button>
+            <button
+              className={`px-4 py-2 rounded-md ${activeTab === 'training' ? 'bg-blue-500 text-white' : 'text-gray-700 hover:bg-gray-100'}`}
+              onClick={() => setActiveTab('training')}
+            >
+              Training
+            </button>
+            <button
+              className={`px-4 py-2 rounded-md ${activeTab === 'metrics' ? 'bg-blue-500 text-white' : 'text-gray-700 hover:bg-gray-100'}`}
+              onClick={() => setActiveTab('metrics')}
+            >
+              Metrics
+            </button>
           </div>
-
-          {/* Tab navigation */}
-          <div className="border-b border-gray-200 mb-8">
-            <nav className="-mb-px flex space-x-8">
-              <button
-                onClick={() => setActiveTab('game')}
-                className={`${
-                  activeTab === 'game'
-                    ? 'border-indigo-500 text-indigo-600'
-                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-                } whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm`}
+        </div>
+        
+        {/* Game Tab */}
+        {activeTab === 'game' && (
+          <div className="bg-white rounded-lg shadow-md p-6">
+            <h2 className="text-2xl font-semibold mb-4">Play Game with Trained Agent</h2>
+            
+            <div className="mb-4">
+              <label className="block text-gray-700 mb-2">Select Model:</label>
+              <select
+                className="w-full p-2 border rounded-md"
+                value={selectedModel}
+                onChange={(e) => setSelectedModel(e.target.value)}
               >
-                Game
-              </button>
-              <button
-                onClick={() => setActiveTab('metrics')}
-                className={`${
-                  activeTab === 'metrics'
-                    ? 'border-indigo-500 text-indigo-600'
-                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-                } whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm`}
-              >
-                Model Metrics
-              </button>
-              <button
-                onClick={() => setActiveTab('experiments')}
-                className={`${
-                  activeTab === 'experiments'
-                    ? 'border-indigo-500 text-indigo-600'
-                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-                } whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm`}
-              >
-                MLflow Experiments
-              </button>
-              <button
-                onClick={() => setActiveTab('wandb')}
-                className={`${
-                  activeTab === 'wandb'
-                    ? 'border-indigo-500 text-indigo-600'
-                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-                } whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm`}
-              >
-                Weights & Biases
-              </button>
-            </nav>
+                <option value="">Select a model</option>
+                {models.map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {model.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            
+            <GameComponent selectedModel={selectedModel} />
           </div>
-
-          {/* Tab content */}
-          <div>
-            {activeTab === 'game' && (
-              <div className="grid grid-cols-1 gap-y-8 lg:grid-cols-3 lg:gap-x-8">
-                <div className="lg:col-span-2">
-                  <div className="bg-white overflow-hidden shadow rounded-lg">
-                    <div className="p-6">
-                      <h2 className="text-lg font-medium text-gray-900 mb-4">
-                        {showTrainingViz ? "Training Visualization" : "Game Simulation"}
-                      </h2>
-                      
-                      {showTrainingViz ? (
-                        <TrainingVisualization />
-                      ) : (
-                        <>
-                          <div className="flex items-center mb-4">
-                            <label htmlFor="model-select" className="block text-sm font-medium text-gray-700 mr-4">
-                              Select Model:
-                            </label>
-                            <select
-                              id="model-select"
-                              className="block w-full max-w-xs border-gray-300 rounded-md shadow-sm p-2 border"
-                              value={selectedModel}
-                              onChange={(e) => setSelectedModel(e.target.value)}
-                            >
-                              {models.map((model) => (
-                                <option key={model.id} value={model.id}>
-                                  {model.name} ({new Date(model.created_at).toLocaleDateString()})
-                                </option>
-                              ))}
-                            </select>
-                          </div>
-                          
-                          <GameComponent selectedModel={selectedModel} />
-                        </>
-                      )}
-                    </div>
-                  </div>
-                </div>
-                
-                <div className="lg:col-span-1">
-                  <div className="bg-white overflow-hidden shadow rounded-lg">
-                    <div className="p-6">
-                      <h2 className="text-lg font-medium text-gray-900 mb-4">Training Controls</h2>
-                      
-                      <div className="mb-4">
-                        {isTraining ? (
-                          <button
-                            onClick={stopTraining}
-                            className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500"
-                          >
-                            Stop Training
-                          </button>
-                        ) : (
-                          <button
-                            onClick={startTraining}
-                            className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                          >
-                            Start Training
-                          </button>
-                        )}
-                        
-                        {!isTraining && showTrainingViz && (
-                          <button
-                            onClick={() => setShowTrainingViz(false)}
-                            className="ml-4 inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md shadow-sm text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                          >
-                            Show Game
-                          </button>
-                        )}
-                        
-                        {!isTraining && !showTrainingViz && (
-                          <button
-                            onClick={() => setShowTrainingViz(true)}
-                            className="ml-4 inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md shadow-sm text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                          >
-                            Show Training Viz
-                          </button>
-                        )}
-                      </div>
-                      
-                      <div className="mt-4">
-                        <h3 className="text-sm font-medium text-gray-700">Training Status:</h3>
-                        <div className="mt-2 max-w-xl text-sm text-gray-500">
-                          {isTraining ? (
-                            <div className="flex items-center">
-                              <div className="mr-2 h-4 w-4 bg-indigo-600 rounded-full animate-pulse"></div>
-                              <p>{trainingStatus}</p>
-                            </div>
-                          ) : (
-                            <p>{trainingStatus || 'Not training'}</p>
-                          )}
-                        </div>
-                      </div>
-                      
-                      <div className="mt-6">
-                        <h3 className="text-sm font-medium text-gray-700">Available Models:</h3>
-                        <ul className="mt-2 divide-y divide-gray-200">
-                          {models.map((model) => (
-                            <li key={model.id} className="py-2">
-                              <div className="flex items-center justify-between">
-                                <div>
-                                  <p className="text-sm font-medium text-gray-900">{model.name}</p>
-                                  <p className="text-sm text-gray-500">Created: {new Date(model.created_at).toLocaleDateString()}</p>
-                                </div>
-                                <span 
-                                  className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
-                                    model.id === selectedModel
-                                      ? 'bg-green-100 text-green-800'
-                                      : 'bg-gray-100 text-gray-800'
-                                  }`}
-                                >
-                                  {model.id === selectedModel ? 'Selected' : 'Select'}
-                                </span>
-                              </div>
-                            </li>
-                          ))}
-                        </ul>
-                      </div>
-                    </div>
-                  </div>
-                </div>
+        )}
+        
+        {/* Training Tab */}
+        {activeTab === 'training' && (
+          <div className="bg-white rounded-lg shadow-md p-6">
+            <h2 className="text-2xl font-semibold mb-4">Train Agent</h2>
+            
+            <div className="mb-4">
+              <div className="flex space-x-4 mb-4">
+                <button
+                  className={`px-4 py-2 rounded-md ${isTraining ? 'bg-gray-400 cursor-not-allowed' : 'bg-blue-500 text-white hover:bg-blue-600'}`}
+                  onClick={startTraining}
+                  disabled={isTraining}
+                >
+                  Start Training
+                </button>
+                <button
+                  className={`px-4 py-2 rounded-md ${!isTraining ? 'bg-gray-400 cursor-not-allowed' : 'bg-red-500 text-white hover:bg-red-600'}`}
+                  onClick={stopTraining}
+                  disabled={!isTraining}
+                >
+                  Stop Training
+                </button>
+              </div>
+              
+              <div className="p-3 bg-gray-100 rounded-md">
+                <p className="text-gray-700">Status: {trainingStatus || 'Not training'}</p>
+              </div>
+            </div>
+            
+            {showTrainingViz && (
+              <div className="mt-6">
+                <h3 className="text-xl font-semibold mb-2">Training Visualization</h3>
+                <TrainingVisualization />
               </div>
             )}
-            
-            {activeTab === 'metrics' && <ModelMetrics />}
-            
-            {activeTab === 'experiments' && <MLflowExperiments />}
-            
-            {activeTab === 'wandb' && <WandBDashboard />}
           </div>
-        </div>
+        )}
+        
+        {/* Metrics Tab */}
+        {activeTab === 'metrics' && (
+          <div className="bg-white rounded-lg shadow-md p-6">
+            <h2 className="text-2xl font-semibold mb-4">Model Metrics</h2>
+            
+            <div className="mb-4">
+              <label className="block text-gray-700 mb-2">Select Model:</label>
+              <select
+                className="w-full p-2 border rounded-md"
+                value={selectedModel}
+                onChange={(e) => setSelectedModel(e.target.value)}
+              >
+                <option value="">Select a model</option>
+                {models.map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {model.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            
+            {selectedModel && <ModelMetrics modelId={selectedModel} />}
+          </div>
+        )}
       </main>
-
-      <footer className="bg-white">
-        <div className="max-w-7xl mx-auto py-6 px-4 sm:px-6 lg:px-8">
-          <p className="text-center text-sm text-gray-500">
-            Flappy Bird Reinforcement Learning - Production Grade AI Application with MLflow, W&B and PySpark
-          </p>
-        </div>
+      
+      <footer className="py-4 text-center text-gray-600">
+        <p>Flappy Bird Reinforcement Learning Project</p>
       </footer>
     </div>
   );

@@ -1,4 +1,4 @@
-# Development mode Dockerfile for Next.js
+# Simple development Dockerfile for Next.js
 FROM node:18-alpine
 
 WORKDIR /app
@@ -21,39 +21,3 @@ EXPOSE 3000
 
 # Start the application in development mode
 CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"]
-
-# Build stage
-FROM node:18-alpine AS builder
-
-WORKDIR /app
-
-# Copy package.json and package-lock.json
-COPY package*.json ./
-
-# Install dependencies
-RUN npm install
-
-# Copy frontend code
-COPY . ./
-
-# Set environment for production build
-ENV NODE_ENV=production
-
-# Build Next.js app
-RUN npm run build
-
-# Production stage using nginx
-FROM nginx:alpine
-
-# Copy the nginx configuration
-RUN rm /etc/nginx/conf.d/default.conf
-COPY nginx.conf /etc/nginx/conf.d/default.conf
-
-# Copy the build output to replace the default nginx contents.
-COPY --from=builder /app/out /usr/share/nginx/html
-
-# Expose port
-EXPOSE 80
-
-# Start nginx
-CMD ["nginx", "-g", "daemon off;"] 

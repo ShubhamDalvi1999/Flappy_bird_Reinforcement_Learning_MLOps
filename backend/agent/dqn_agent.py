@@ -16,6 +16,7 @@ class DQNAgent:
         self.epsilon_decay = 0.995
         self.learning_rate = 0.001
         self.update_target_frequency = 10  # how often to update target network
+        self.batch_size = 32  # batch size for training
         
         # Memory for experience replay
         self.memory = deque(maxlen=10000)
@@ -32,7 +33,7 @@ class DQNAgent:
         self.reward_history = []
         self.epsilon_history = []
         
-        # Track action distribution for W&B visualization
+        # Track action distribution
         self.action_counts = {0: 0, 1: 0}
         
         # Model saving
